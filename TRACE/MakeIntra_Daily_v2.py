@@ -84,7 +84,7 @@ fisd = fisd[(fisd.convertible == 'N')]
 fisd = fisd[(fisd.asset_backed == 'N')]
 
 #6: Discard all bonds under Rule 144A
-# fisd = fisd[(fisd.rule_144a == 'N')]
+fisd = fisd[(fisd.rule_144a == 'N')]
 
 #7: Remove Agency bonds, Muni Bonds, Government Bonds, 
 mask_corp = ((fisd.bond_type != 'TXMU')&  (fisd.bond_type != 'CCOV') &  (fisd.bond_type != 'CPAS')\
@@ -105,11 +105,7 @@ mask_corp = ((fisd.bond_type != 'TXMU')&  (fisd.bond_type != 'CCOV') &  (fisd.bo
             &  (fisd.bond_type != 'ASPZ')\
             &  (fisd.bond_type != 'EMTN')\
             &  (fisd.bond_type != 'ADNT')\
-            &  (fisd.bond_type != 'ARNT')\
-            # Remove preferred securities and inflation indexed securities #
-            &  (fisd.bond_type != 'PSTK')\
-            &  (fisd.bond_type != 'PS')\
-            &  (fisd.bond_type != 'IIDX'))
+            &  (fisd.bond_type != 'ARNT'))
 fisd = fisd[(mask_corp)]
 
 #8: No Private Placement
@@ -161,12 +157,12 @@ IDs = fisd[['complete_cusip']]
 #* Ensure IDs unique                      */
 #* ************************************** */ 
 IDs = pd.concat([IDs, IDs_KPP], axis = 0)
-IDs = IDs.drop_duplicates(subset='complete_cusip')
+IDS = IDs.drop_duplicates(subset='complete_cusip')
 
 #* ************************************** */
 #* Break into chunks for WRDS             */
 #* ************************************** */  
-CUSIP_Sample = list( IDs['complete_cusip'].unique() )
+CUSIP_Sample = list( fisd['complete_cusip'].unique() )
 def divide_chunks(l, n): 	
 	# looping till length l 
 	for i in range(0, len(l), n): 
@@ -200,7 +196,8 @@ for i in range(0,len(cusip_chunks)):
     #* Load data from WRDS per chunk          */
     #* ************************************** */ 
         
-    trace = db.raw_sql('SELECT cusip_id,bond_sym_id,trd_exctn_dt,trd_exctn_tm,days_to_sttl_ct,lckd_in_ind,wis_fl,sale_cndtn_cd,msg_seq_nb, trc_st, trd_rpt_dt,trd_rpt_tm, entrd_vol_qt, rptd_pr,yld_pt,asof_cd,orig_msg_seq_nb,rpt_side_cd,cntra_mp_id FROM trace.trace_enhanced WHERE cusip_id in %(cusip_id)s', params=parm)
+    trace = db.raw_sql('SELECT cusip_id,bond_sym_id,trd_exctn_dt,trd_exctn_tm,days_to_sttl_ct,lckd_in_ind,wis_fl,sale_cndtn_cd,msg_seq_nb, trc_st, trd_rpt_dt,trd_rpt_tm, entrd_vol_qt, rptd_pr,yld_pt,asof_cd,orig_msg_seq_nb,rpt_side_cd,cntra_mp_id FROM trace.trace_enhanced WHERE cusip_id in %(cusip_id)s', 
+                  params=parm)
            
     CleaningExport['Obs.Pre'].iloc[i] = int(len(trace))
     
@@ -231,8 +228,8 @@ for i in range(0,len(cusip_chunks)):
         # Convert sale condition indicator to string    
         trace['sale_cndtn_cd'] = trace['sale_cndtn_cd'].astype('str') 
                                                   
-        # Remove trades with volume < $1,000
-        trace = trace[ (trace['entrd_vol_qt']) >= 1000  ]      
+        # Remove trades with volume < $10,000
+        trace = trace[ (trace['entrd_vol_qt']) >= 10000  ]      
                         
         CleaningExport['Obs.PostBBW'].iloc[i] = int(len(trace))                                                                                          
     
@@ -568,7 +565,7 @@ for i in range(0,len(cusip_chunks)):
         
         _del_w =  clean_pre2[clean_pre2.trc_st_w == "W"]                                                                              
 
-        # * Delete matched T records;
+       # * Delete matched T records;
         _clean_pre2 =  clean_pre2[clean_pre2['trc_st_w'].isnull()]
                        
         _clean_pre2 = _clean_pre2.drop(columns = ['trc_st_w', 
@@ -602,10 +599,10 @@ for i in range(0,len(cusip_chunks)):
               
         clean_pre3 = pd.concat([_clean_pre2, rep_w], axis = 0)
         
-        #* ***************** */
-        #* 2.3 Reversal Case */
-        #* ***************** */
-        # Filter data by asof_cd = 'R' and keep only certain columns
+       #* ***************** */
+       #* 2.3 Reversal Case */
+       #* ***************** */
+       # Filter data by asof_cd = 'R' and keep only certain columns
        
         _rev_header = clean_pre3[ clean_pre3['asof_cd'] == 'R'][[  'cusip_id', 
                                                                    'bond_sym_id',
