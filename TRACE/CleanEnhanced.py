@@ -716,7 +716,6 @@ PricesExport = pd.concat(price_super_list , axis=0     , ignore_index=False)
 VolumeExport = pd.concat(volume_super_list, axis=0     , ignore_index=False)
 IlliqExport  = pd.concat(illiquidity_super_list, axis=0, ignore_index=False)
 
-
 # Save in compressed GZIP format # 
 PricesExport.to_csv('Prices_' + agg_level + '.csv.gzip'     , compression='gzip')   
 VolumeExport.to_csv('Volumes_' + agg_level + '.csv.gzip'    , compression='gzip')     
