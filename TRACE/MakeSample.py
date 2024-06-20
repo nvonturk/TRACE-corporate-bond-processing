@@ -1,7 +1,7 @@
 ##########################################
 # Isolates issues for analysis           #
-# Nick von Turkovich                     #
-# Email: nvonturk@mit.edu                #
+# Alexander Dickerson                    #
+# Email: a.dickerson@warwick.ac.uk       #
 # Date: June 2024                        #
 # Updated:  June 2024                    #
 # Version:  1.0.0                        #
@@ -36,7 +36,26 @@ fisd_issue = db.raw_sql("""SELECT complete_cusip, issue_id,
                   FROM fisd.fisd_mergedissue  
                   """)
                   
-fisd = pd.merge(fisd_issue, fisd_issuer, on = ['issuer_id'], how = "left")                              
+fisd = pd.merge(fisd_issue, fisd_issuer, on = ['issuer_id'], how = "left")      
+
+#* ************************************** */
+#* Ensure KPP Bonds are in the sample     */
+#* ************************************** */  
+# This ensures all CUSIPs from the paper,
+# "Reconciling TRACE bond returns", by
+# Bryan Kelly and Seth Pruitt are included.
+# The paper is here: 
+# https://sethpruitt.net/2022/03/29/reconciling-trace-bond-returns/
+IDs_KPP = pd.read_csv('cusips.csv')
+IDs_KPP.drop(['Unnamed: 0'], axis = 1, inplace = True)
+IDs_KPP.columns = ['complete_cusip']
+
+# Merge in information on rule 144a if available for the bonds in the KPP sample
+IDs_KPP = pd.merge(IDs_KPP, fisd[['complete_cusip', 'rule_144a']], on = ['complete_cusip'], how = "left")
+
+# If any KPP bonds don't have FISD information for rule 144a, assume they are not 144a bonds
+IDs_KPP['rule_144a'] = IDs_KPP['rule_144a'].fillna('N')
+
 #* ************************************** */
 #* Apply BBW Bond Filters                 */
 #* ************************************** */  
@@ -84,8 +103,8 @@ mask_corp = ((fisd.bond_type != 'TXMU')&  (fisd.bond_type != 'CCOV') &  (fisd.bo
             &  (fisd.bond_type != 'IIDX'))
 fisd = fisd[(mask_corp)]
 
-#8: No Private Placement
-fisd = fisd[(fisd.private_placement == 'N')]
+#8: No Private Placement if not 144a
+fisd = fisd[~((fisd.private_placement == 'Y') & (fisd.rule_144a == 'N'))]
 
 #9: Remove floating-rate, bi-monthly and unclassified coupons
 fisd = fisd[(fisd.interest_frequency != -1) ] # Unclassified by Mergent
@@ -112,22 +131,9 @@ fisd = fisd[~fisd.coupon_type.isnull()]
 fisd = fisd[~fisd.coupon.isnull()]
 
 #* ************************************** */
-#* Ensure KPP Bonds are in the sample     */
-#* ************************************** */  
-# This ensures all CUSIPs from the paper,
-# "Reconciling TRACE bond returns", by
-# Bryan Kelly and Seth Pruitt are included.
-# The paper is here: 
-# https://sethpruitt.net/2022/03/29/reconciling-trace-bond-returns/
-IDs_KPP = pd.read_csv('cusips.csv')
-IDs_KPP.drop(['Unnamed: 0'], axis = 1, inplace = True)
-IDs_KPP.columns = ['complete_cusip']
-
-
-#* ************************************** */
 #* Parse out bonds for processing         */
 #* ************************************** */           
-IDs = fisd[['complete_cusip']]
+IDs = fisd[['complete_cusip', 'rule_144a']]
 
 #* ************************************** */
 #* Ensure IDs unique                      */
@@ -136,5 +142,5 @@ IDs = pd.concat([IDs, IDs_KPP], axis = 0)
 IDs = IDs.drop_duplicates(subset='complete_cusip')
 
 # Save in compressed GZIP format # 
-IDs.to_csv('IDs.csv')   
+IDs.to_csv('IDs.csv', index=False)   
 # =============================================================================  
