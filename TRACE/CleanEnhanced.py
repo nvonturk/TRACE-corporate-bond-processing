@@ -53,7 +53,7 @@ IDs = IDs[IDs['rule_144a'] == 'N']
 #* ************************************** */
 #* Determine level of time aggregation    */
 #* ************************************** */ 
-agg_level = 'daily' # daily, hourly
+agg_level = 'hourly' # daily, hourly
 
 #* ************************************** */
 #* Break into chunks for WRDS             */
@@ -81,7 +81,7 @@ price_super_list       = []
 volume_super_list      = []
 illiquidity_super_list = []
 
-for i in range(0,len(cusip_chunks)):  
+for i in range(0,1):  
     print(i)
     tempList = cusip_chunks[i]    
     tempTuple = tuple(tempList)
@@ -125,8 +125,8 @@ for i in range(0,len(cusip_chunks)):
         # Convert sale condition indicator to string    
         trace['sale_cndtn_cd'] = trace['sale_cndtn_cd'].astype('str') 
                                                   
-        # Remove trades with volume < $1,000
-        trace = trace[ (trace['entrd_vol_qt']) >= 1000  ]      
+        # Remove trades with volume < $10,000
+        trace = trace[ (trace['entrd_vol_qt']) >= 10000  ]      
                         
         CleaningExport['Obs.PostBBW'].iloc[i] = int(len(trace))                                                                                          
     
@@ -629,14 +629,14 @@ for i in range(0,len(cusip_chunks)):
         # Create aggregation time variable
         if agg_level == 'daily':
             trace_post['agg_level'] = 'daily'
-            trace_post['agg_time'] = None
+            trace_post['trd_exctn_dtm'] = trace_post['trd_exctn_dtm'].apply(lambda x: x.replace(hour=0, minute=0, second=0))
         elif agg_level == 'hourly':
             trace_post['agg_level'] = 'hourly'
-            trace_post['agg_time'] = trace_post['trd_exctn_dtm'].dt.hour
+            trace_post['trd_exctn_dtm'] = trace_post['trd_exctn_dtm'].apply(lambda x: x.replace(minute=0, second=0))
         else:
             raise ValueError('agg_level must be daily or hourly')
     
-        trace = trace_post.set_index(['cusip_id','trd_exctn_dt','agg_level','agg_time']).sort_index(level = 'cusip_id') 
+        trace = trace_post.set_index(['cusip_id','trd_exctn_dtm','agg_level']).sort_index(level = 'cusip_id') 
         
         CleaningExport['Obs.PostDickNielsen'].iloc[i] = int(len(trace))
 
@@ -644,22 +644,21 @@ for i in range(0,len(cusip_chunks)):
         #* Prices / Volume   */
         #* ***************** */
         # Price - Equal-Weight   #
-        prc_EW = trace.groupby(['cusip_id','trd_exctn_dt','agg_level','agg_time'])[['rptd_pr']].mean().sort_index(level  =  'cusip_id').round(4) 
+        prc_EW = trace.groupby(['cusip_id','trd_exctn_dtm','agg_level'])[['rptd_pr']].mean().sort_index(level  =  'cusip_id').round(4) 
         prc_EW.columns = ['prc_ew']
         
         # Price - Volume-Weight # 
         trace['dollar_vol']    = ( trace['entrd_vol_qt'] * trace['rptd_pr']/100 ).round(0) # units x clean prc                               
-        trace['value-weights'] = trace.groupby([ 'cusip_id','trd_exctn_dt','agg_level','agg_time'],
-                                                group_keys=False)[['entrd_vol_qt']].apply( lambda x: x/np.nansum(x) )
-        prc_VW = trace.groupby(['cusip_id','trd_exctn_dt','agg_level','agg_time'])[['rptd_pr','value-weights']].apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) ).to_frame().round(4)
+        trace['value-weights'] = trace.groupby([ 'cusip_id','trd_exctn_dtm','agg_level'], group_keys=False)[['entrd_vol_qt']].apply(lambda x: x/np.nansum(x))
+        prc_VW = trace.groupby(['cusip_id','trd_exctn_dtm','agg_level'])[['rptd_pr','value-weights']].apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) ).to_frame().round(4)
         prc_VW.columns = ['prc_vw']
         
         PricesAll = prc_EW.merge(prc_VW, how = "inner", left_index = True, right_index = True)  
         PricesAll.columns                = ['prc_ew','prc_vw']   
            
         # Volume #
-        VolumesAll                        = trace.groupby(['cusip_id','trd_exctn_dt', 'agg_level','agg_time'])[['entrd_vol_qt']].sum().sort_index(level  =  "cusip_id")                       
-        VolumesAll['dollar_volume']       = trace.groupby(['cusip_id','trd_exctn_dt', 'agg_level','agg_time'])[['dollar_vol']].sum().sort_index(level  =  "cusip_id").round(0)
+        VolumesAll                        = trace.groupby(['cusip_id','trd_exctn_dtm', 'agg_level'])[['entrd_vol_qt']].sum().sort_index(level  =  "cusip_id")                       
+        VolumesAll['dollar_volume']       = trace.groupby(['cusip_id','trd_exctn_dtm', 'agg_level'])[['dollar_vol']].sum().sort_index(level  =  "cusip_id").round(0)
         VolumesAll.columns                = ['qvolume','dvolume']      
 
         # Illiquidity #
@@ -674,12 +673,12 @@ for i in range(0,len(cusip_chunks)):
         # Volume weight Bids #
         _bid['dollar_vol']    = ( _bid['entrd_vol_qt'] * _bid['rptd_pr']/100 )\
             .round(0) # units x clean prc                               
-        _bid['value-weights'] = _bid.groupby([ 'cusip_id','trd_exctn_dt','agg_level','agg_time'],
+        _bid['value-weights'] = _bid.groupby([ 'cusip_id','trd_exctn_dtm','agg_level'],
                     group_keys=False)[['entrd_vol_qt']]\
             .apply( lambda x: x/np.nansum(x) )
         
         prc_BID = _bid.groupby(['cusip_id',
-                               'trd_exctn_dt','agg_level','agg_time'])[['rptd_pr',
+                               'trd_exctn_dtm','agg_level'])[['rptd_pr',
                                                  'value-weights']]\
             .apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) )\
                 .to_frame().round(4)
@@ -689,12 +688,12 @@ for i in range(0,len(cusip_chunks)):
         # Volume weight Asks #
         _ask['dollar_vol']    = ( _ask['entrd_vol_qt'] * _ask['rptd_pr']/100 )\
             .round(0) # units x clean prc                               
-        _ask['value-weights'] = _ask.groupby([ 'cusip_id','trd_exctn_dt','agg_level','agg_time'],
+        _ask['value-weights'] = _ask.groupby([ 'cusip_id','trd_exctn_dtm','agg_level'],
                     group_keys=False)[['entrd_vol_qt']]\
             .apply( lambda x: x/np.nansum(x) )
         
         prc_ASK = _ask.groupby(['cusip_id',
-                               'trd_exctn_dt','agg_level','agg_time'])[['rptd_pr',
+                               'trd_exctn_dtm','agg_level'])[['rptd_pr',
                                                  'value-weights']]\
             .apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) )\
                 .to_frame().round(4)
