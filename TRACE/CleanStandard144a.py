@@ -135,8 +135,8 @@ for i in range(0,len(cusip_chunks)):
         trace['ascii_rptd_vol_tx'] = trace['ascii_rptd_vol_tx'].replace({'5MM+': '5000000', '1MM+': '1000000'})
         trace['entrd_vol_qt'] = pd.to_numeric(trace['ascii_rptd_vol_tx'], errors='coerce')
 
-        # Remove trades with volume < $1,000
-        trace = trace[ (trace['entrd_vol_qt']) >= 1000  ]
+        # Remove trades with volume < $10,000
+        trace = trace[ (trace['entrd_vol_qt']) >= 10000  ]
 
         CleaningExport['Obs.PostBBW'].iloc[i] = int(len(trace))   
 
