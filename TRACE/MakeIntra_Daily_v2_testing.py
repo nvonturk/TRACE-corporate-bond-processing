@@ -1,11 +1,11 @@
 ##########################################
-# Enhanced TRACE Data Processing         #
+# Enhanced TRACE Data Proces             #
 # Part (i): Intra day to Daily           #
 # Alexander Dickerson                    #
 # Email: a.dickerson@warwick.ac.uk       #
-# Date: June 2024                        #
-# Updated:  June 2024                    #
-# Version:  1.0.0                        #
+# Date: September 2023                   #
+# Updated:  September 2023               #
+# Version:  2.0.0                        #
 ##########################################
 
 ##########################################
@@ -36,34 +36,11 @@ import pandas as pd
 pd.options.mode.chained_assignment = None  # default='warn'
 import numpy as np
 import wrds
-import sys
-import os
-
-#* ************************************** */
-#* Parse arguments to script              */
-#* ************************************** */
-
-valid_agg_levels = ['daily', 'hourly']
-
-args = sys.argv[1:]
-
-if len(args) > 2:
-    raise ValueError('Too many arguments')
-elif len(args) == 2:
-    if not os.path.isfile(args[0]):
-         raise ValueError('First argument must be a valid file path to CUSIP IDs')
-    if args[1] not in valid_agg_levels:
-        raise ValueError('First argument must be either "daily" or "hourly"')
-    ids_filepath = args[0]
-    agg_level = args[1]
-elif len(args) == 1:
-    if not os.path.isfile(args[0]):
-         raise ValueError('First argument must be a valid file path to CUSIP IDs')
-    ids_filepath = args[0]
-    agg_level = 'daily'
-else:
-    ids_filepath = 'IDs.csv'
-    agg_level = 'daily'
+from itertools import chain
+import datetime as dt
+import zipfile
+import csv
+import gzip
 
 #* ************************************** */
 #* Connect to WRDS                        */
@@ -71,17 +48,122 @@ else:
 db = wrds.Connection()
 
 #* ************************************** */
-#* Collect CUSIPs for analysis            */
-#* ************************************** */ 
-IDs = pd.read_csv(ids_filepath)
+#* Download Mergent File                  */
+#* ************************************** */  
+fisd_issuer = db.raw_sql("""SELECT issuer_id,country_domicile                 
+                  FROM fisd.fisd_mergedissuer 
+                  """)
 
-# Since we are pulling from enhanced TRACE, we can isolate only the non-rule 144a bonds as these have a dedicated TRACE standard BTDS feeds
-IDs = IDs[IDs['rule_144a'] == 'N']
+fisd_issue = db.raw_sql("""SELECT complete_cusip, issue_id,
+                  issuer_id, foreign_currency,
+                  coupon_type,coupon,convertible,
+                  asset_backed,rule_144a,
+                  bond_type,private_placement,
+                  interest_frequency,dated_date,
+                  day_count_basis,offering_date                 
+                  FROM fisd.fisd_mergedissue  
+                  """)
+                  
+fisd = pd.merge(fisd_issue, fisd_issuer, on = ['issuer_id'], how = "left")                              
+#* ************************************** */
+#* Apply BBW Bond Filters                 */
+#* ************************************** */  
+#1: Discard all non-US Bonds (i) in BBW
+fisd = fisd[(fisd.country_domicile == 'USA')]
+
+#2.1: US FX
+fisd = fisd[(fisd.foreign_currency == 'N')]
+
+#3: Must have a fixed coupon
+fisd = fisd[(fisd.coupon_type != 'V')]
+
+#4: Discard ALL convertible bonds
+fisd = fisd[(fisd.convertible == 'N')]
+
+#5: Discard all asset-backed bonds
+fisd = fisd[(fisd.asset_backed == 'N')]
+
+#6: Discard all bonds under Rule 144A
+fisd = fisd[(fisd.rule_144a == 'N')]
+
+#7: Remove Agency bonds, Muni Bonds, Government Bonds, 
+mask_corp = ((fisd.bond_type != 'TXMU')&  (fisd.bond_type != 'CCOV') &  (fisd.bond_type != 'CPAS')\
+            &  (fisd.bond_type != 'MBS') &  (fisd.bond_type != 'FGOV')\
+            &  (fisd.bond_type != 'USTC')   &  (fisd.bond_type != 'USBD')\
+            &  (fisd.bond_type != 'USNT')  &  (fisd.bond_type != 'USSP')\
+            &  (fisd.bond_type != 'USSI') &  (fisd.bond_type != 'FGS')\
+            &  (fisd.bond_type != 'USBL') &  (fisd.bond_type != 'ABS')\
+            &  (fisd.bond_type != 'O30Y')\
+            &  (fisd.bond_type != 'O10Y') &  (fisd.bond_type != 'O3Y')\
+            &  (fisd.bond_type != 'O5Y') &  (fisd.bond_type != 'O4W')\
+            &  (fisd.bond_type != 'CCUR') &  (fisd.bond_type != 'O13W')\
+            &  (fisd.bond_type != 'O52W')\
+            &  (fisd.bond_type != 'O26W')\
+            # Remove all Agency backed / Agency bonds #
+            &  (fisd.bond_type != 'ADEB')\
+            &  (fisd.bond_type != 'AMTN')\
+            &  (fisd.bond_type != 'ASPZ')\
+            &  (fisd.bond_type != 'EMTN')\
+            &  (fisd.bond_type != 'ADNT')\
+            &  (fisd.bond_type != 'ARNT'))
+fisd = fisd[(mask_corp)]
+
+#8: No Private Placement
+fisd = fisd[(fisd.private_placement == 'N')]
+
+#9: Remove floating-rate, bi-monthly and unclassified coupons
+fisd = fisd[(fisd.interest_frequency != -1) ] # Unclassified by Mergent
+fisd = fisd[(fisd.interest_frequency != 13) ] # Variable Coupon (V)
+fisd = fisd[(fisd.interest_frequency != 14) ] # Bi-Monthly Coupon
+fisd = fisd[(fisd.interest_frequency != 16) ] # Unclassified by Mergent
+fisd = fisd[(fisd.interest_frequency != 15) ] # Unclassified by Mergent
+
+#10 Remove bonds lacking information for accrued interest (and hence returns)
+fisd['offering_date']            = pd.to_datetime(fisd['offering_date'], format='%Y-%m-%d')
+fisd['dated_date']               = pd.to_datetime(fisd['dated_date'],    format='%Y-%m-%d')
+
+# 10.1 Dated date
+fisd = fisd[~fisd.dated_date.isnull()]
+# 10.2 Interest frequency
+fisd = fisd[~fisd.interest_frequency.isnull()]
+# 10.3 Day count basis
+fisd = fisd[~fisd.day_count_basis.isnull()]
+# 10.4 Offering date
+fisd = fisd[~fisd.offering_date.isnull()]
+# 10.5 Coupon type
+fisd = fisd[~fisd.coupon_type.isnull()]
+# 10.6 Coupon value
+fisd = fisd[~fisd.coupon.isnull()]
+
+#* ************************************** */
+#* Ensure KPP Bonds are in the sample     */
+#* ************************************** */  
+# This ensures all CUSIPs from the paper,
+# "Reconciling TRACE bond returns", by
+# Bryan Kelly and Seth Pruitt are included.
+# The paper is here: 
+# https://sethpruitt.net/2022/03/29/reconciling-trace-bond-returns/
+IDs_KPP = pd.read_csv('cusips.csv')
+IDs_KPP.drop(['Unnamed: 0'], axis = 1, inplace = True)
+IDs_KPP.columns = ['complete_cusip']
+
+
+#* ************************************** */
+#* Parse out bonds for processing         */
+#* ************************************** */           
+IDs = fisd[['complete_cusip']]
+
+#* ************************************** */
+#* Ensure IDs unique                      */
+#* ************************************** */ 
+IDs = pd.concat([IDs, IDs_KPP], axis = 0)
+IDS = IDs.drop_duplicates(subset='complete_cusip')
 
 #* ************************************** */
 #* Break into chunks for WRDS             */
 #* ************************************** */  
-CUSIP_Sample = list( IDs['complete_cusip'].unique() )
+CUSIP_Sample = list( fisd['complete_cusip'].unique() )
+CUSIP_Sample = list(pd.read_csv("RandomCUSIPs.csv")['complete_cusip'])
 def divide_chunks(l, n): 	
 	# looping till length l 
 	for i in range(0, len(l), n): 
@@ -89,6 +171,7 @@ def divide_chunks(l, n):
 
 cusip_chunks  = list(divide_chunks(CUSIP_Sample, 500)) 
 
+    
 #* ************************************** */
 #* Pre-allocate for Cleaning Statistics   */
 #* ************************************** */ 
@@ -114,7 +197,8 @@ for i in range(0,len(cusip_chunks)):
     #* Load data from WRDS per chunk          */
     #* ************************************** */ 
         
-    trace = db.raw_sql('SELECT cusip_id,bond_sym_id,trd_exctn_dt,trd_exctn_tm,days_to_sttl_ct,lckd_in_ind,wis_fl,sale_cndtn_cd,msg_seq_nb, trc_st, trd_rpt_dt,trd_rpt_tm, entrd_vol_qt, rptd_pr,yld_pt,asof_cd,orig_msg_seq_nb,rpt_side_cd,cntra_mp_id FROM trace_enhanced.trace_enhanced WHERE cusip_id in %(cusip_id)s', params=parm)
+    trace = db.raw_sql('SELECT cusip_id,bond_sym_id,trd_exctn_dt,trd_exctn_tm,days_to_sttl_ct,lckd_in_ind,wis_fl,sale_cndtn_cd,msg_seq_nb, trc_st, trd_rpt_dt,trd_rpt_tm, entrd_vol_qt, rptd_pr,yld_pt,asof_cd,orig_msg_seq_nb,rpt_side_cd,cntra_mp_id FROM trace.trace_enhanced WHERE cusip_id in %(cusip_id)s', 
+                  params=parm)
            
     CleaningExport['Obs.Pre'].iloc[i] = int(len(trace))
     
@@ -128,10 +212,7 @@ for i in range(0,len(cusip_chunks)):
         
         # Convert dates to datetime        
         trace['trd_exctn_dt']         = pd.to_datetime(trace['trd_exctn_dt'], format = '%Y-%m-%d')
-        trace['trd_rpt_dt']           = pd.to_datetime(trace['trd_rpt_dt'],   format = '%Y-%m-%d')    
-
-        # Create full datetime column
-        trace['trd_exctn_dtm'] = pd.to_datetime(trace['trd_exctn_dt'].astype(str) + trace['trd_exctn_tm'].astype(str), format = '%Y-%m-%d%H:%M:%S')
+        trace['trd_rpt_dt']           = pd.to_datetime(trace['trd_rpt_dt'],   format = '%Y-%m-%d')         
                
         #* ************************************ */
         #* Variable Handling                    */
@@ -485,7 +566,7 @@ for i in range(0,len(cusip_chunks)):
         
         _del_w =  clean_pre2[clean_pre2.trc_st_w == "W"]                                                                              
 
-        # * Delete matched T records;
+       # * Delete matched T records;
         _clean_pre2 =  clean_pre2[clean_pre2['trc_st_w'].isnull()]
                        
         _clean_pre2 = _clean_pre2.drop(columns = ['trc_st_w', 
@@ -519,10 +600,10 @@ for i in range(0,len(cusip_chunks)):
               
         clean_pre3 = pd.concat([_clean_pre2, rep_w], axis = 0)
         
-        #* ***************** */
-        #* 2.3 Reversal Case */
-        #* ***************** */
-        # Filter data by asof_cd = 'R' and keep only certain columns
+       #* ***************** */
+       #* 2.3 Reversal Case */
+       #* ***************** */
+       # Filter data by asof_cd = 'R' and keep only certain columns
        
         _rev_header = clean_pre3[ clean_pre3['asof_cd'] == 'R'][[  'cusip_id', 
                                                                    'bond_sym_id',
@@ -639,8 +720,7 @@ for i in range(0,len(cusip_chunks)):
         # =====================================================================
         # * Combine the pre and post data together */;
         clean_post2 = clean_post2[[                    'cusip_id',
-                                                       'trd_exctn_dt', 
-                                                       'trd_exctn_dtm',                                                   
+                                                       'trd_exctn_dt',                                                    
                                                        'rptd_pr',
                                                        'entrd_vol_qt',
                                                        'rpt_side_cd',
@@ -648,40 +728,31 @@ for i in range(0,len(cusip_chunks)):
         _clean_pre5 = _clean_pre5[clean_post2.columns]
               
         trace_post = pd.concat([_clean_pre5, clean_post2], ignore_index=True)
-
-        # Create aggregation time variable
-        if agg_level == 'daily':
-            trace_post['agg_level'] = 'daily'
-            trace_post['trd_exctn_dtm'] = trace_post['trd_exctn_dtm'].apply(lambda x: x.replace(hour=0, minute=0, second=0))
-        elif agg_level == 'hourly':
-            trace_post['agg_level'] = 'hourly'
-            trace_post['trd_exctn_dtm'] = trace_post['trd_exctn_dtm'].apply(lambda x: x.replace(minute=0, second=0))
-        else:
-            raise ValueError('agg_level must be daily or hourly')
     
-        trace = trace_post.set_index(['cusip_id','trd_exctn_dtm','agg_level']).sort_index(level = 'cusip_id') 
+        trace = trace_post.set_index(['cusip_id','trd_exctn_dt']).sort_index(level = 'cusip_id') 
         
         CleaningExport['Obs.PostDickNielsen'].iloc[i] = int(len(trace))
-
+        
         #* ***************** */
         #* Prices / Volume   */
         #* ***************** */
         # Price - Equal-Weight   #
-        prc_EW = trace.groupby(['cusip_id','trd_exctn_dtm','agg_level'])[['rptd_pr']].mean().sort_index(level  =  'cusip_id').round(4) 
+        prc_EW = trace.groupby(['cusip_id','trd_exctn_dt'])[['rptd_pr']].mean().sort_index(level  =  'cusip_id').round(4) 
         prc_EW.columns = ['prc_ew']
         
         # Price - Volume-Weight # 
         trace['dollar_vol']    = ( trace['entrd_vol_qt'] * trace['rptd_pr']/100 ).round(0) # units x clean prc                               
-        trace['value-weights'] = trace.groupby([ 'cusip_id','trd_exctn_dtm','agg_level'], group_keys=False)[['entrd_vol_qt']].apply(lambda x: x/np.nansum(x))
-        prc_VW = trace.groupby(['cusip_id','trd_exctn_dtm','agg_level'])[['rptd_pr','value-weights']].apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) ).to_frame().round(4)
+        trace['value-weights'] = trace.groupby([ 'cusip_id','trd_exctn_dt'],
+                                                group_keys=False)[['entrd_vol_qt']].apply( lambda x: x/np.nansum(x) )
+        prc_VW = trace.groupby(['cusip_id','trd_exctn_dt'])[['rptd_pr','value-weights']].apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) ).to_frame().round(4)
         prc_VW.columns = ['prc_vw']
         
         PricesAll = prc_EW.merge(prc_VW, how = "inner", left_index = True, right_index = True)  
         PricesAll.columns                = ['prc_ew','prc_vw']   
            
         # Volume #
-        VolumesAll                        = trace.groupby(['cusip_id','trd_exctn_dtm', 'agg_level'])[['entrd_vol_qt']].sum().sort_index(level  =  "cusip_id")                       
-        VolumesAll['dollar_volume']       = trace.groupby(['cusip_id','trd_exctn_dtm', 'agg_level'])[['dollar_vol']].sum().sort_index(level  =  "cusip_id").round(0)
+        VolumesAll                        = trace.groupby(['cusip_id','trd_exctn_dt'])[['entrd_vol_qt']].sum().sort_index(level  =  "cusip_id")                       
+        VolumesAll['dollar_volume']       = trace.groupby(['cusip_id','trd_exctn_dt'])[['dollar_vol']].sum().sort_index(level  =  "cusip_id").round(0)
         VolumesAll.columns                = ['qvolume','dvolume']      
 
         # Illiquidity #
@@ -696,12 +767,12 @@ for i in range(0,len(cusip_chunks)):
         # Volume weight Bids #
         _bid['dollar_vol']    = ( _bid['entrd_vol_qt'] * _bid['rptd_pr']/100 )\
             .round(0) # units x clean prc                               
-        _bid['value-weights'] = _bid.groupby([ 'cusip_id','trd_exctn_dtm','agg_level'],
+        _bid['value-weights'] = _bid.groupby([ 'cusip_id','trd_exctn_dt'],
                     group_keys=False)[['entrd_vol_qt']]\
             .apply( lambda x: x/np.nansum(x) )
         
         prc_BID = _bid.groupby(['cusip_id',
-                               'trd_exctn_dtm','agg_level'])[['rptd_pr',
+                               'trd_exctn_dt'])[['rptd_pr',
                                                  'value-weights']]\
             .apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) )\
                 .to_frame().round(4)
@@ -711,12 +782,12 @@ for i in range(0,len(cusip_chunks)):
         # Volume weight Asks #
         _ask['dollar_vol']    = ( _ask['entrd_vol_qt'] * _ask['rptd_pr']/100 )\
             .round(0) # units x clean prc                               
-        _ask['value-weights'] = _ask.groupby([ 'cusip_id','trd_exctn_dtm','agg_level'],
+        _ask['value-weights'] = _ask.groupby([ 'cusip_id','trd_exctn_dt'],
                     group_keys=False)[['entrd_vol_qt']]\
             .apply( lambda x: x/np.nansum(x) )
         
         prc_ASK = _ask.groupby(['cusip_id',
-                               'trd_exctn_dtm','agg_level'])[['rptd_pr',
+                               'trd_exctn_dt'])[['rptd_pr',
                                                  'value-weights']]\
             .apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) )\
                 .to_frame().round(4)
@@ -738,8 +809,9 @@ PricesExport = pd.concat(price_super_list , axis=0     , ignore_index=False)
 VolumeExport = pd.concat(volume_super_list, axis=0     , ignore_index=False)
 IlliqExport  = pd.concat(illiquidity_super_list, axis=0, ignore_index=False)
 
+
 # Save in compressed GZIP format # 
-PricesExport.to_csv('Prices_' + agg_level + '.csv.gzip'     , compression='gzip')   
-VolumeExport.to_csv('Volumes_' + agg_level + '.csv.gzip'    , compression='gzip')     
-IlliqExport.to_csv( 'Illiq_' + agg_level + '.csv.gzip'      , compression='gzip')     
+PricesExport.to_csv('Prices.csv.gzip'     , compression='gzip')   
+VolumeExport.to_csv('Volumes.csv.gzip'    , compression='gzip')     
+IlliqExport.to_csv( 'Illiq.csv.gzip'      , compression='gzip')     
 # =============================================================================  
