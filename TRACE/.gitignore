@@ -1,0 +1,4 @@
+% Specific files to ignore within TRACE
+!.gitignore
+IDs.csv
+*.csv.gzip
