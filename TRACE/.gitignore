@@ -1,5 +1,7 @@
 % Specific files to ignore within TRACE
 !.gitignore
-IDs.csv
+*.csv
 *.csv.gzip
-RandomCusips.csv
+!cusips.csv
+!ind12.csv
+*.sas7bdat

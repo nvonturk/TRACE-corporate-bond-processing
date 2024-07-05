@@ -1,9 +1,9 @@
 ##########################################
-# Trace standard processing              #
+# Trace Standard processing              #
 # Nick von Turkovich                     #
 # Email: nvonturk@mit.edu                #
-# Date: June 2024                        #
-# Updated:  June 2024                    #
+# Date: July 2024                        #
+# Updated:  July 2024                    #
 # Version:  1.0.0                        #
 ##########################################
 
@@ -16,9 +16,6 @@
 # this SAS code to Python                #
 ##########################################
 
-#* ************************************** */
-#* Packages                               */
-#* ************************************** */  
 import pandas as pd
 pd.options.mode.chained_assignment = None  # default='warn'
 import numpy as np
@@ -26,926 +23,280 @@ import wrds
 import sys
 import os
 
-#* ************************************** */
-#* Parse arguments to script              */
-#* ************************************** */
-
 valid_agg_levels = ['daily', 'hourly']
 valid_feed_types = ['non_rule_144a', 'rule_144a']
 
-args = sys.argv[1:]
+def parse_arguments():
+    args = sys.argv[1:]
 
-if len(args) > 3:
-    raise ValueError('Too many arguments')
-elif len(args) == 3:
-    if not os.path.isfile(args[0]):
-         raise ValueError('First argument must be a valid file path to CUSIP IDs')
-    if args[0] not in valid_agg_levels:
-        raise ValueError('First argument must be either "daily" or "hourly"')
-    if args[1] not in valid_feed_types:
-        raise ValueError('Second argument must be either "non_rule_144a" or "rule_144a')
-    ids_filepath = args[0]
-    agg_level = args[1]
-    feed_type = args[2]
-elif len(args) == 2:
-    if not os.path.isfile(args[0]):
-         raise ValueError('First argument must be a valid file path to CUSIP IDs')
-    if args[0] not in valid_agg_levels:
-        raise ValueError('First argument must be either "daily" or "hourly"')
-    ids_filepath = args[0]
-    agg_level = args[1]
-elif len(args) == 1:
-    if not os.path.isfile(args[0]):
-         raise ValueError('First argument must be a valid file path to CUSIP IDs')
-    ids_filepath = args[0]
-    agg_level = 'daily'
-    feed_type = 'non_rule_144a'
-else:
-    ids_filepath = 'IDs.csv'
-    agg_level = 'daily'
-    feed_type = 'non_rule_144a'
-
-#* ************************************** */
-#* Connect to WRDS                        */
-#* ************************************** */  
-db = wrds.Connection()
-
-#* ************************************** */
-#* Collect CUSIPs for analysis            */
-#* ************************************** */ 
-IDs = pd.read_csv('IDs.csv')
-
-# We isolate only the 144a bonds as these have a dedicated TRACE standard BTDS feeds
-if feed_type == 'rule_144a':
-    IDs = IDs[IDs['rule_144a'] == 'Y']
-else:
-    IDs = IDs[IDs['rule_144a'] != 'Y']
-
-#* ************************************** */
-#* Break into chunks for WRDS             */
-#* ************************************** */  
-CUSIP_Sample = list( IDs['complete_cusip'].unique() )
-def divide_chunks(l, n): 	
-	# looping till length l 
-	for i in range(0, len(l), n): 
-		yield l[i:i + n] 
-
-cusip_chunks  = list(divide_chunks(CUSIP_Sample, 500)) 
-
-#* ************************************** */
-#* Pre-allocate for Cleaning Statistics   */
-#* ************************************** */ 
-CleaningExport   = pd.DataFrame( index   = range(0,len(cusip_chunks)),
-                               columns = ['Obs.Pre',
-                                          'Obs.PostBBW',
-                                          'Obs.PostDickNielsen'])
-#* ************************************** */
-#* Iterate over the chunks                */
-#* ************************************** */ 
-
-price_super_list       = []
-volume_super_list      = []
-illiquidity_super_list = []
-
-for i in range(0,len(cusip_chunks)):  
-    print(i)
-    tempList = cusip_chunks[i]    
-    tempTuple = tuple(tempList)
-    parm = {'cusip_id': (tempTuple)}
+    if len(args) > 3:
+        raise ValueError('Too many arguments')
+    elif len(args) == 3:
+        if not os.path.isfile(args[0]):
+             raise ValueError('First argument must be a valid file path to CUSIP IDs')
+        if args[0] not in valid_agg_levels:
+            raise ValueError('First argument must be either "daily" or "hourly"')
+        if args[1] not in valid_feed_types:
+            raise ValueError('Second argument must be either "non_rule_144a" or "rule_144a')
+        ids_filepath = args[0]
+        agg_level = args[1]
+        feed_type = args[2]
+    elif len(args) == 2:
+        if not os.path.isfile(args[0]):
+             raise ValueError('First argument must be a valid file path to CUSIP IDs')
+        if args[0] not in valid_agg_levels:
+            raise ValueError('First argument must be either "daily" or "hourly"')
+        ids_filepath = args[0]
+        agg_level = args[1]
+    elif len(args) == 1:
+        if not os.path.isfile(args[0]):
+             raise ValueError('First argument must be a valid file path to CUSIP IDs')
+        ids_filepath = args[0]
+        agg_level = 'daily'
+        feed_type = 'non_rule_144a'
+    else:
+        ids_filepath = 'IDs.csv'
+        agg_level = 'daily'
+        feed_type = 'non_rule_144a'
     
-    #* ************************************** */
-    #* Load data from WRDS per chunk          */
-    #* ************************************** */ 
-        
-    # Load data from BTDS and BTDS144a feeds
+    return ids_filepath, agg_level, feed_type
+
+def gather_trace_data(db, cusip_chunk, feed_type):
+    parm = {'cusip_id': (tuple(cusip_chunk))}
+    
     trace_btds = db.raw_sql('SELECT * FROM trace_standard.trace WHERE cusip_id in %(cusip_id)s', params=parm)
     trace_btds144a = db.raw_sql('SELECT * FROM trace_standard.trace_btds144a WHERE cusip_id in %(cusip_id)s', params=parm)
 
-    # Make dissemination dates datetime objects
     trace_btds['trans_dt'] = pd.to_datetime(trace_btds['trans_dt'], format = '%Y-%m-%d')
     trace_btds144a['trans_dt'] = pd.to_datetime(trace_btds144a['trans_dt'], format = '%Y-%m-%d')
 
     if feed_type == 'rule_144a':
-        # If any rows in the BTDS feed have a trans_dt after June 30, 2014, throw an error
         if len(trace_btds[trace_btds['trans_dt'] >= '2014-06-30']) > 0:
             raise ValueError('BTDS feed has data after June 30, 2014')
         
-        # If any rows in the BTDS 144a feed have a trans_dt before June 30, 2014, throw an error
         if len(trace_btds144a[trace_btds144a['trans_dt'] < '2014-06-30']) > 0:
             raise ValueError('BTDS144a feed has data before June 30, 2014')
 
-        # Filter the BTDS feed for data prior to June 30, 2014
         trace_btds = trace_btds[~(trace_btds['trans_dt'] >= '2014-06-30')]
-
-        # Filter the BTDS144a feed for data after June 30, 2014
         trace_btds144a = trace_btds144a[trace_btds144a['trans_dt'] >= '2014-06-30']
-            
-        # Concatenate the two feeds
         trace = pd.concat([trace_btds, trace_btds144a], ignore_index=True)
     else:
         trace = trace_btds
-
-    CleaningExport['Obs.Pre'].iloc[i] = int(len(trace))
     
-    #### Basically try-catch --> ensure >100 obs in the pulled data, handles
-    #### edge cases where there is not any data     
-    if len(trace) <= 100:
-        CleaningExport['Obs.PostBBW'].iloc[i] = int(len(trace))
-        CleaningExport['Obs.PostDickNielsen'].iloc[i] = int(len(trace))
-        continue
+    return trace
+
+def clean_trace_data(trace):
+            
+    trace['trd_exctn_dt'] = pd.to_datetime(trace['trd_exctn_dt'], format = '%Y-%m-%d')    
+    
+    trace['days_to_sttl_ct'] = trace['days_to_sttl_ct'].astype('str')                   
+    trace['wis_fl'] = trace['wis_fl'].astype('str')     
+    trace['sale_cndtn_cd'] = trace['sale_cndtn_cd'].astype('str') 
+    trace['ascii_rptd_vol_tx'] = trace['ascii_rptd_vol_tx'].replace({'5MM+': '5000000', '1MM+': '1000000'})
+    trace['entrd_vol_qt'] = pd.to_numeric(trace['ascii_rptd_vol_tx'], errors='coerce')
+
+    _clean1 = trace[trace['cusip_id'].isnull() == False]
+    _clean1['trc_st'] = _clean1['trc_st'].replace({'G': 'T', 'M': 'T', 'H': 'C', 'N': 'C', 'I': 'W', 'O': 'W'})
+    columns_to_keep = [
+        'cusip_id', 'bond_sym_id', 'bsym', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb', 'trc_st', 'wis_fl', 'cmsn_trd',
+        'entrd_vol_qt', 'rptd_pr', 'yld_pt', 'asof_cd', 'side', 'diss_rptg_side_cd', 'orig_msg_seq_nb', 'orig_dis_dt',
+        'rptg_party_type', 'contra_party_type'
+    ]
+    _clean1 = _clean1[columns_to_keep].rename(columns={'diss_rptg_side_cd': 'rpt_side_cd'})
+
+    _c = _clean1[_clean1['trc_st'] == 'C']
+    _w = _clean1[_clean1['trc_st'] == 'W']
+    _t = _clean1[_clean1['trc_st'] == 'T']                        
+
+    _clean2 = pd.merge(
+        _t, _c[['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'orig_msg_seq_nb', 'trc_st']],
+        how='left',
+        left_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'msg_seq_nb'],
+        right_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'orig_msg_seq_nb'],
+        suffixes=('', '_c')
+        ).drop(columns=['orig_msg_seq_nb_c']).drop_duplicates()
+    
+    _del_c = _clean2[_clean2['trc_st_c'] == 'C']
+    _clean2 = _clean2[_clean2['trc_st_c'].isnull()].drop(columns=['trc_st_c'])
+
+    #* ************************************ */
+    #* 3.0 Removing Correction Cases        */
+    #* ************************************ */ 
+    
+    # NOTE: on a given day, a bond can have more than one round of correction. One W to correct an older W, which then corrects the original T. Before joining back to the T data, first need to clean out the W to handle the situation described above. The following section handles the chain of W cases.
+
+    # 3.1 Sort out all msg_seq_nb
+    __w_msg = _w[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb']]
+    __w_msg['flag'] = 'msg'
+
+    # Sort out all mapped original msg_seq_nb
+    __w_omsg = _w[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'orig_msg_seq_nb']]
+    __w_omsg['flag'] = 'omsg'
+    __w_omsg = __w_omsg.rename(columns={'orig_msg_seq_nb': 'msg_seq_nb'})
+
+    __w = pd.concat([__w_omsg, __w_msg])
+
+    # 3.2 Count the number of appearance (napp) of a msg_seq_nb: if appears more than once then it is part of later correction
+    __w_napp = __w.groupby(['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb']).size().reset_index(name='napp')
+
+    # 3.3 Check whether one msg_seq_nb is associated with both msg and orig_msg or only to orig_msg. If msg_seq_nb appearing more than once is associated with only orig_msg then it means that more than one msg_seq_nb is linked to the same orig_msg_seq_nb for correction. Examples: cusip_id='362320AX1' and trd_Exctn_dt='04FEB2005'd (3 cases like this in total). If ntype=2 then a msg_seq_nb is associated with being both msg_seq_nb and orig_msg_seq_nb.
+    __w_mult = __w[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb', 'flag']].drop_duplicates()
+    __w_mult1 = __w_mult.groupby(['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb']).size().reset_index(name='ntype').drop_duplicates()
+
+    # 3.4 Combine the npair and ntype info
+    __w_comb = pd.merge(__w_napp, __w_mult1[["cusip_id", "trd_exctn_dt", "trd_exctn_tm", "msg_seq_nb", "ntype"]], on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], how='left').sort_values(by=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm']).drop_duplicates()
+
+    # Map back by matching CUSIP Excution Date and Time to remove msg_seq_nb that appears more than once. If napp=1 or (napp>1 but ntype=1)
+    __w_keep = pd.merge(__w_comb[(__w_comb['napp'] == 1) | ((__w_comb['napp'] > 1) & (__w_comb['ntype'] == 1))], __w, on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], how='inner', suffixes=('', '_DROP')).filter(regex='^(?!.*_DROP)').sort_values(by=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm']).drop_duplicates()
+
+    # 3.5 Caluclate no of pair of records
+    __w_keep['npair'] = __w_keep.groupby(by=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm'])['cusip_id'].transform("count") / 2
+    __w_keep = __w_keep.drop_duplicates().sort_values(by=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm'])
+
+    # For records with only one pair of entry at a given time stamp - transpose using the flag information
+    __w_keep1 = __w_keep[__w_keep['npair'] == 1].pivot(index=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm'], columns='flag', values='msg_seq_nb').reset_index().rename(columns={'msg': 'msg_seq_nb', 'omsg': 'orig_msg_seq_nb'})
+
+    # For records with more than one pair of entry at a given time stamp - join back the original msg_seq_nb
+    __w_keep2 = pd.merge(__w_keep[((__w_keep['npair'] > 1) & (__w_keep['flag'] == 'msg'))][['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb']], _w[['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb', 'orig_msg_seq_nb']], left_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], right_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], how='left').drop_duplicates()
+
+    __w_clean = pd.concat([__w_keep1, __w_keep2], axis=0)
+    __w_clean.drop(columns=['bond_sym_id'], inplace=True)
+
+    # 3.6 Join back to get all the other information
+    _w_clean = pd.merge(__w_clean, _w.drop(columns=['orig_msg_seq_nb']), left_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], right_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], how='left').drop_duplicates()
+
+    # 3.7 Match up with Trade Record data to delete the matched T record; matching by cusip_id, date, and msg_seq_nb; W records show orig_msg_seq_nb matching original record msg_seq_nb
+    _clean3 = pd.merge(_clean2, _w_clean[['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'orig_msg_seq_nb', 'msg_seq_nb', 'trc_st']], left_on=['cusip_id', 'trd_exctn_dt', 'msg_seq_nb'], right_on=['cusip_id', 'trd_exctn_dt', 'orig_msg_seq_nb'], how='left', suffixes=('', '_w')).rename(columns={'msg_seq_nb_w': 'mod_msg_seq_nb', 'orig_msg_seq_nb_w': 'mod_orig_msg_seq_nb'}).drop_duplicates()
+
+    _del_w = _clean3[_clean3['trc_st_w'] == 'W']
+
+    # Delete matched T records
+    _clean3 = _clean3[_clean3['trc_st_w'].isnull()].drop(columns = ['trc_st_w', 'mod_msg_seq_nb', 'mod_orig_msg_seq_nb', 'trd_exctn_tm_w'])
+
+    # Replace T records with corresponding W records; filter out W records with valid matching T from the previous step
+    _rep_w = pd.merge(_w_clean, _del_w[['cusip_id', 'trd_exctn_dt', 'mod_msg_seq_nb', 'mod_orig_msg_seq_nb', 'trc_st_w']], left_on=['cusip_id', 'trd_exctn_dt', 'msg_seq_nb'], right_on=['cusip_id', 'trd_exctn_dt', 'mod_msg_seq_nb'], how='left').drop_duplicates()
+
+    _rep_w = _rep_w[_rep_w['trc_st_w'] == 'W'].drop(columns = ['trc_st_w', 'mod_msg_seq_nb', 'mod_orig_msg_seq_nb'])
+
+    _rep_w = _rep_w.sort_values(by=['cusip_id', 'trd_exctn_dt', 'msg_seq_nb', 'orig_msg_seq_nb', 'rptd_pr', 'entrd_vol_qt']).drop_duplicates(subset = ['cusip_id', 'trd_exctn_dt', 'msg_seq_nb', 'orig_msg_seq_nb', 'rptd_pr', 'entrd_vol_qt'])
+
+    # Combine the cleaned T records and correct replacement W records
+    _clean4 = pd.concat([_clean3, _rep_w], axis=0)
+
+    # 4.0 Remove Reversals
+    _rev_header = _clean4[(_clean4['asof_cd'] == 'R')][['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'rpt_side_cd', 'contra_party_type']]
+
+    # Match by only 6 keys: cusip_id, execution date, vol, price, B/S and C/D (remove the time dimension)
+    _rev_header_sorted = _rev_header.sort_values(by=['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type', 'trd_exctn_tm'])
+
+    # Reset index for ease of operation
+    _rev_header_sorted.reset_index(drop=True, inplace=True)
+
+    # Create a new column to identify groups and reset 'seq' for each group
+    group_columns = ['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type']
+
+    # Use groupby to increment seq for each group
+    _rev_header_sorted['seq'] = _rev_header_sorted.groupby(group_columns, dropna=False).cumcount() + 1
+
+    _rev_header6 = _rev_header_sorted
+
+    # Create the same ordering among the non-reversal records; remove records that are R (reversal), D (delayed dissemination), and X (delayed reversal)
+    _clean5 = _clean4[(_clean4['asof_cd'] != 'R') & (_clean4['asof_cd'] != 'D') & (_clean4['asof_cd'] != 'X')]
+
+    _clean5_header = _clean5[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'rpt_side_cd', 'contra_party_type', 'msg_seq_nb']]
+
+    # Match by 6 keys (excluding execution time)
+    _clean5_header_sorted = _clean5_header.sort_values(by=['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type', 'trd_exctn_tm', 'msg_seq_nb'])
+
+    # Reset index for ease of operation
+    _clean5_header_sorted.reset_index(drop=True, inplace=True)
+
+    # Create a new column to identify groups and reset 'seq6' for each group
+    group_columns = ['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type']
+
+    # Use groupby to increment seq6 for each group
+    _clean5_header_sorted['seq6'] = _clean5_header_sorted.groupby(group_columns, dropna=False).cumcount() + 1
+
+    _clean5_header = _clean5_header_sorted
+
+    # Join reversal with non-reversal to delete the corresponding ones
+    _clean5_header = pd.merge(_clean5_header, _rev_header6.drop(columns=['bond_sym_id', 'trd_exctn_tm']), left_on =['cusip_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type', 'seq6'], right_on=['cusip_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type', 'seq'], how='left').rename(columns={'seq': 'rev_seq6'}).drop_duplicates()
+
+    _rev_matched6 = _clean5_header[~(_clean5_header['rev_seq6'].isnull())]
+
+    # As 6 key matching has a higher record of finding reversal match, use the 6 key results now
+    _clean5_header = _clean5_header[(_clean5_header['rev_seq6'].isnull())].drop(columns=['rev_seq6'])
+
+    _clean6 = pd.merge(_clean5, _clean5_header[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'rpt_side_cd', 'contra_party_type', 'msg_seq_nb']], on=['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'rpt_side_cd', 'contra_party_type', 'msg_seq_nb'], how='inner').drop_duplicates()
+
+    # 5.0 Clean Agency Transaction
+
+    # New variables available starting in June 2015: SIDE Contra_party_type rptg_party_type
+    _clean6['rpt_side_cd'] = _clean6['rpt_side_cd'].combine_first(_clean6['side'])
+
+    # 3.1 Remove trades double reported by both buy and sell of the inter-dealer trade
+    _agency_s = _clean6[(_clean6['rpt_side_cd'] == 'S') & (_clean6['contra_party_type'] == 'D')]   
+
+    _agency_b = _clean6[(_clean6['rpt_side_cd'] == 'B') & (_clean6['contra_party_type'] == 'D')]
+
+    trace_standard_clean = _clean6
+
+    return trace_standard_clean
+
+
+def main():
+    ids_filepath, agg_level, feed_type = parse_arguments()
+    
+    db = wrds.Connection()
+    
+    IDs = pd.read_csv(ids_filepath)
+    
+    if feed_type == 'rule_144a':
+        IDs = IDs[IDs['rule_144a'] == 'Y']
     else:
-
-        # Convert dates to datetime        
-        trace['trd_exctn_dt']         = pd.to_datetime(trace['trd_exctn_dt'], format = '%Y-%m-%d')    
-
-        # Create full datetime column
-        trace['trd_exctn_dtm'] = pd.to_datetime(trace['trd_exctn_dt'].astype(str) + trace['trd_exctn_tm'].astype(str), format = '%Y-%m-%d%H:%M:%S')
-               
-        #* ************************************ */
-        #* Variable Handling                    */
-        #* ************************************ */
-        # Convert Settlement indicator to string     
-        trace['days_to_sttl_ct'] = trace['days_to_sttl_ct'].astype('str')                   
-        
-        # Convert when-issued indicator to string    
-        trace['wis_fl'] = trace['wis_fl'].astype('str')     
-        
-        # Convert sale condition indicator to string    
-        trace['sale_cndtn_cd'] = trace['sale_cndtn_cd'].astype('str') 
-
-        # Convert Text Upper Volume Bound to Number
-        trace['ascii_rptd_vol_tx'] = trace['ascii_rptd_vol_tx'].replace({'5MM+': '5000000', '1MM+': '1000000'})
-        trace['entrd_vol_qt'] = pd.to_numeric(trace['ascii_rptd_vol_tx'], errors='coerce')
-
-        # Remove trades with volume < $10,000
-        trace = trace[ (trace['entrd_vol_qt']) >= 10000  ]
-
-        CleaningExport['Obs.PostBBW'].iloc[i] = int(len(trace))   
-
-        #* ************************************ */
-        #* 1.0 Reassign Other Values            */
-        #* ************************************ */ 
-        
-        # Drop if CUSIP not available
-        _clean1 = trace[trace['cusip_id'] != '']
-
-        # Convert Different TRC_ST values to be uniform
-        _clean1['trc_st'] = _clean1['trc_st'].replace({'G': 'T', 'M': 'T', 'H': 'C', 'N': 'C', 'I': 'W', 'O': 'W'})
-
-        # Keep specific columns and rename DISS_RPTG_SIDE_CD to RPT_SIDE_CD
-        columns_to_keep = [
-            'cusip_id', 'bond_sym_id', 'bsym', 'trd_exctn_dt', 'trd_exctn_tm', 'trd_exctn_dtm', 'msg_seq_nb', 'trc_st', 'wis_fl', 'cmsn_trd',
-            'entrd_vol_qt', 'rptd_pr', 'yld_pt', 'asof_cd', 'side', 'diss_rptg_side_cd', 'orig_msg_seq_nb', 'orig_dis_dt',
-            'rptg_party_type', 'contra_party_type'
-        ]
-        _clean1 = _clean1[columns_to_keep].rename(columns={'diss_rptg_side_cd': 'rpt_side_cd'})
-  
-        # Separate the cleaned data into three datasets based on TRC_ST values
-        _c = _clean1[_clean1['trc_st'] == 'C']
-        _w = _clean1[_clean1['trc_st'] == 'W']
-        _t = _clean1[_clean1['trc_st'] == 'T']                        
+        IDs = IDs[IDs['rule_144a'] != 'Y']
     
-        #* ************************************ */
-        #* 2.0 Removing Cancellation Cases      */
-        #* ************************************ */              
-        
-        # Match same-day cancellation using: cusip_id, execution date and time, quantity, price
-        # C records show orig_msg_seq_nb matching the trade record msg_seq_nb
-        _clean2 = pd.merge(
-             _t, _c[['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'orig_msg_seq_nb', 'trc_st']],
-            how='left',
-            left_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'msg_seq_nb'],
-            right_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'orig_msg_seq_nb'],
-            suffixes=('', '_c')
-            ).drop_duplicates()
-        
-        _del_c = _clean2[_clean2['trc_st_c'] == 'C']
-        _clean2 = _clean2[_clean2['trc_st_c'].isnull()]
-
-        #* ************************************ */
-        #* 3.0 Removing Correction Cases        */
-        #* ************************************ */ 
-        
-        # NOTE: on a given day, a bond can have more than one round of correction. One W to correct an older W, which then corrects the original T. Before joining back to the T data, first need to clean out the W to handle the situation described above. The following section handles the chain of W cases.
-
-        # 3.1 Sort out all msg_seq_nb
-        __w_msg = _w[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb']]
-        __w_msg['flag'] = 'msg'
-
-        # Sort out all mapped original msg_seq_nb
-        __w_omsg = _w[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'orig_msg_seq_nb']]
-        __w_omsg['flag'] = 'omsg'
-        __w_omsg = __w_omsg.rename(columns={'orig_msg_seq_nb': 'msg_seq_nb'})
-
-        __w = pd.concat([__w_omsg, __w_msg])
-
-        # 3.2 Count the number of appearance (napp) of a msg_seq_nb: if appears more than once then it is part of later correction
-        __w_napp = __w.groupby(['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb']).size().reset_index(name='napp')
-
-        # 3.3 Check whether one msg_seq_nb is associated with both msg and orig_msg or only to orig_msg. If msg_seq_nb appearing more than once is associated with only orig_msg then it means that more than one msg_seq_nb is linked to the same orig_msg_seq_nb for correction. Examples: cusip_id='362320AX1' and trd_Exctn_dt='04FEB2005'd (3 cases like this in total). If ntype=2 then a msg_seq_nb is associated with being both msg_seq_nb and orig_msg_seq_nb.
-        __w_mult = __w[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb', 'flag']].drop_duplicates()
-        __w_mult1 = __w_mult.groupby(['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb']).size().reset_index(name='ntype').drop_duplicates()
-
-        # 3.4 Combine the npair and ntype info
-        __w_comb = pd.merge(__w_napp, __w_mult1[["cusip_id", "trd_exctn_dt", "trd_exctn_tm", "msg_seq_nb", "ntype"]], on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], how='left').sort_values(by=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm']).drop_duplicates()
-
-        # Map back by matching CUSIP Excution Date and Time to remove msg_seq_nb that appears more than once. If napp=1 or (napp>1 but ntype=1)
-        __w_keep = pd.merge(__w_comb[(__w_comb['napp'] == 1) | ((__w_comb['napp'] > 1) & (__w_comb['ntype'] == 1))], __w, on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], how='inner', suffixes=('', '_DROP')).filter(regex='^(?!.*_DROP)').sort_values(by=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm']).drop_duplicates()
-
-        # 3.5 Caluclate no of pair of records
-        __w_keep['npair'] = __w_keep.groupby(by=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm'])['cusip_id'].transform("count") / 2
-        __w_keep = __w_keep.drop_duplicates().sort_values(by=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm'])
-
-        # For records with only one pair of entry at a given time stamp - transpose using the flag information
-        __w_keep1 = __w_keep[__w_keep['npair'] == 1].pivot(index=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm'], columns='flag', values='msg_seq_nb').reset_index().rename(columns={'msg': 'msg_seq_nb', 'omsg': 'orig_msg_seq_nb'})
-
-        # For records with more than one pair of entry at a given time stamp - join back the original msg_seq_nb
-        __w_keep2 = pd.merge(__w_keep[((__w_keep['npair'] > 1) & (__w_keep['flag'] == 'msg'))][['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb']], _w[['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb', 'orig_msg_seq_nb']], left_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], right_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], how='left').drop_duplicates()
-
-        __w_clean = pd.concat([__w_keep1, __w_keep2], axis=0)
-        __w_clean.drop(columns=['bond_sym_id'], inplace=True)
-
-        # 3.6 Join back to get all the other information
-        _w_clean = pd.merge(__w_clean, _w.drop(columns=['orig_msg_seq_nb']), left_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], right_on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], how='left').drop_duplicates()
-
-        # 3.7 Match up with Trade Record data to delete the matched T record; matching by cusip_id, date, and msg_seq_nb; W records show orig_msg_seq_nb matching original record msg_seq_nb
-        _clean3 = pd.merge(_clean2, _w_clean[['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'orig_msg_seq_nb', 'msg_seq_nb', 'trc_st']], left_on=['cusip_id', 'trd_exctn_dt', 'msg_seq_nb'], right_on=['cusip_id', 'trd_exctn_dt', 'orig_msg_seq_nb'], how='left', suffixes=('', '_w')).rename(columns={'msg_seq_nb_w': 'mod_msg_seq_nb', 'orig_msg_seq_nb_w': 'mod_orig_msg_seq_nb'}).drop_duplicates()
-
-        _del_w = _clean3[_clean3['trc_st'] == 'W']
-
-        # Delete matched T records
-        _clean3 = _clean3[_clean3['trc_st_w'].isnull()].drop(columns = ['trc_st_w', 'mod_msg_seq_nb', 'mod_orig_msg_seq_nb', 'trd_exctn_tm_w'])
-
-        # Replace T records with corresponding W records; filter out W records with valid matching T from the previous step
-        _rep_w = pd.merge(_w_clean, _del_w[['cusip_id', 'trd_exctn_dt', 'mod_msg_seq_nb', 'mod_orig_msg_seq_nb', 'trc_st_w']], left_on=['cusip_id', 'trd_exctn_dt', 'msg_seq_nb'], right_on=['cusip_id', 'trd_exctn_dt', 'mod_msg_seq_nb'], how='left').drop_duplicates()
-
-        _rep_w = _rep_w[_rep_w['trc_st_w'] == 'W'].drop(columns = ['trc_st_w', 'mod_msg_seq_nb', 'mod_orig_msg_seq_nb'])
-
-        _rep_w = _rep_w.sort_values(by=['cusip_id', 'trd_exctn_dt', 'msg_seq_nb', 'orig_msg_seq_nb', 'rptd_pr', 'entrd_vol_qt']).drop_duplicates(subset = ['cusip_id', 'trd_exctn_dt', 'msg_seq_nb', 'orig_msg_seq_nb', 'rptd_pr', 'entrd_vol_qt'])
-
-        # Combine the cleaned T records and correct replacement W records
-        _clean4 = pd.concat([_clean3, _rep_w], axis=0)
-
-        # 4.0 Remove Reversals
-        _rev_header = _clean4[(_clean4['asof_cd'] == 'R')][['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'rpt_side_cd', 'contra_party_type']]
-
-        # Match by only 6 keys: cusip_id, execution date, vol, price, B/S and C/D (remove the time dimension)
-        _rev_header_sorted = _rev_header.sort_values(by=['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type', 'trd_exctn_tm'])
-
-        # Reset index for ease of operation
-        _rev_header_sorted.reset_index(drop=True, inplace=True)
-
-        # Initialize the 'seq' column
-        _rev_header_sorted['seq'] = 0
-
-        # Create a new column to identify groups and reset 'seq' for each group
-        group_columns = ['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type']
-
-        # Use groupby to increment seq for each group
-        for name, group in _rev_header_sorted.groupby(group_columns):
-            _rev_header_sorted.loc[group.index, 'seq'] = range(1, len(group) + 1)
-
-        _rev_header6 = _rev_header_sorted
-
-        # Create the same ordering among the non-reversal records; remove records that are R (reversal), D (delayed dissemination), and X (delayed reversal)
-        _clean5 = _clean4[(_clean4['asof_cd'] != 'R') & (_clean4['asof_cd'] != 'D') & (_clean4['asof_cd'] != 'X')]
-
-        _clean5_header = _clean5[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'rpt_side_cd', 'contra_party_type', 'msg_seq_nb']]
-
-        # Match by 6 keys (excluding execution time)
-        _clean5_header_sorted = _clean5_header.sort_values(by=['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type', 'trd_exctn_tm', 'msg_seq_nb'])
-
-        # Reset index for ease of operation
-        _clean5_header_sorted.reset_index(drop=True, inplace=True)
-
-        # Initialize the 'seq6' column
-        _clean5_header_sorted['seq6'] = 0
-
-        # Create a new column to identify groups and reset 'seq6' for each group
-        group_columns = ['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type']
-
-        # Use groupby to increment seq6 for each group
-        for name, group in _clean5_header_sorted.groupby(group_columns):
-            _clean5_header_sorted.loc[group.index, 'seq6'] = range(1, len(group) + 1)
-
-        _clean5_header = _clean5_header_sorted
-
-        # Join reversal with non-reversal to delete the corresponding ones
-        _clean5_header = pd.merge(_clean5_header, _rev_header6, left_on =['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type', 'seq6'], right_on=['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'entrd_vol_qt', 'rptd_pr', 'rpt_side_cd', 'contra_party_type', 'seq'], how='left').drop_duplicates()
-
-        _rev_matched6 = _clean5_header[(_clean5_header['seq'].notnull())]
-
-        # As 6 key matching has a higher record of finding reversal match, use the 6 key results now
-        _clean5_header = _clean5_header[(_clean5_header['seq'].isnull())]
-
-        _clean6 = pd.merge(_clean5, _clean5_header[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'rpt_side_cd', 'contra_party_type', 'msg_seq_nb']], on=['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'rptd_pr', 'entrd_vol_qt', 'rpt_side_cd', 'contra_party_type', 'msg_seq_nb'], how='inner').drop_duplicates()
-
-        # 5.0 Clean Agency Transaction
-
-        # New variables available starting in June 2015: SIDE Contra_party_type rptg_party_type
-        _clean6['rpt_side_cd'] = _clean6['rpt_side_cd'].combine_first(_clean6['side'])
-
-        # 3.1 Remove trades double reported by both buy and sell of the inter-dealer trade
-        _agency_sell = _clean6[(_clean6['rpt_side_cd'] == 'S') & (_clean6['contra_party_type'] == 'D')]   
-
-        _agency_b = _clean6[(_clean6['rpt_side_cd'] == 'B') & (_clean6['contra_party_type'] == 'D')]  
-
-
-
-
-
-        
-        
-        
-        
-        
-        
-        
-        post= trace[(trace['cusip_id'] != '') & (trace['trd_rpt_dt'] >="2012-02-06")]
-        pre = trace[(trace['cusip_id'] != '') & (trace['trd_rpt_dt'] < "2012-02-06")]   
-        
-        #* ************************************** */
-        #* 1.1 Remove Cancellation and Correction */
-        #* ************************************** */        
-        
-        # * Match Cancellation and Correction using following 7 keys:
-        # * Cusip_id, Execution Date and Time, Quantity, Price, Buy/Sell Indicator, Contra Party
-        # * C and X records show the same MSG_SEQ_NB as the original record;
-                
-        post_tr = post[(post['trc_st'] == 'T') | (post['trc_st'] == 'R')]       
-        post_xc = post[(post['trc_st'] == 'X') | (post['trc_st'] == 'C')]       
-        post_y  = post[(post['trc_st'] == 'Y')]      
-        
-        _clean_post1 = pd.merge(post_tr.drop_duplicates(), post_xc[[
-                          'cusip_id',        # 1
-                          'trd_exctn_dt',    # 2
-                          'trd_exctn_tm',    # 3
-                          'rptd_pr',         # 4
-                          'entrd_vol_qt',    # 5
-                          'rpt_side_cd',     # 6
-                          'cntra_mp_id',     # 7
-                          'msg_seq_nb',      # 8
-                          'trc_st']],    
-                           left_on=[
-                              'cusip_id',        # 1
-                              'trd_exctn_dt',    # 2
-                              'trd_exctn_tm',    # 3
-                              'rptd_pr',         # 4
-                              'entrd_vol_qt',    # 5
-                              'rpt_side_cd',     # 6
-                              'cntra_mp_id',     # 7
-                              'msg_seq_nb'],     # 8
-                                          right_on=[ 
-                                         'cusip_id',          # 1
-                                           'trd_exctn_dt',    # 2
-                                           'trd_exctn_tm',    # 3
-                                           'rptd_pr',         # 4
-                                           'entrd_vol_qt',    # 5
-                                           'rpt_side_cd',     # 6
-                                           'cntra_mp_id',     # 7
-                                           'msg_seq_nb'],     # 8                       
-                        how = "left")
-                             
-        # Remove the matched "Trade Report" observations;
-        clean_post1 = _clean_post1[_clean_post1['trc_st_y'].isnull()]
-                        
-        # Clean-up clean_post1#
-        clean_post1.drop(['trc_st_y'], axis = 1, inplace = True)
-        clean_post1.rename(columns={'trc_st_x':'trc_st'}, inplace=True) 
-                
-        #* ******************** */
-        #* 1.2 Remove Reversals */
-        #* ******************** */
-
-        # * Match Reversal using the same 7 keys:
-        # * Cusip_id, Execution Date and Time, Quantity, Price, Buy/Sell Indicator, Contra Party
-        # * R records show ORIG_MSG_SEQ_NB matching orignal record MSG_SEQ_NB;
-        _clean_post2 = pd.merge(_clean_post1.drop_duplicates(), post_y[[
-                          'cusip_id',        # 1
-                          'trd_exctn_dt',    # 2
-                          'trd_exctn_tm',    # 3
-                          'rptd_pr',         # 4
-                          'entrd_vol_qt',    # 5
-                          'rpt_side_cd',     # 6
-                          'cntra_mp_id',     # 7
-                          'orig_msg_seq_nb', # 8
-                          'trc_st']],    
-                           left_on=[
-                              'cusip_id',        # 1
-                              'trd_exctn_dt',    # 2
-                              'trd_exctn_tm',    # 3
-                              'rptd_pr',         # 4
-                              'entrd_vol_qt',    # 5
-                              'rpt_side_cd',     # 6
-                              'cntra_mp_id',     # 7
-                              'msg_seq_nb'],     # 8
-                                          right_on=[ 
-                                         'cusip_id',          # 1
-                                           'trd_exctn_dt',    # 2
-                                           'trd_exctn_tm',    # 3
-                                           'rptd_pr',         # 4
-                                           'entrd_vol_qt',    # 5
-                                           'rpt_side_cd',     # 6
-                                           'cntra_mp_id',     # 7
-                                           'orig_msg_seq_nb'],# 8                       
-                        how = "left")
-                             
-        # Remove the matched "Trade Report" observations;
-        clean_post2 = _clean_post2[_clean_post2['trc_st_y'].isnull()].drop_duplicates()
-                        
-        # Clean-up clean_post1#
-        clean_post2.drop(['orig_msg_seq_nb_y','trc_st_y','trc_st'], axis = 1, inplace = True)
-        clean_post2.rename(columns={'orig_msg_seq_nb_x':'orig_msg_seq_nb',
-                                    'trc_st_x':'trc_st'}, inplace=True) 
-              
-        #* ********************************* */
-        #* Pre 2012-02-06 Data               */
-        #* ********************************* */
-        
-        #* ************************************ */
-        #*  van Binsbergen, Nozawa, and Schwert */
-        #*  We restrict the bond transactions in */
-        #*  our sample by removing those that are */
-        #*  whenissued, have special conditions, are  */
-        #*  locked in, and have days-to-settlement  */
-        #*  of more than two */
-        #*  days in the pre-2012 database */
-        #* ************************************ */     
-                
-        # Remove trades with > 2-days to settlement #
-        # Keep all with days_to_sttl_ct equal to None, 000, 001 or 002
-        pre = pre[   (pre['days_to_sttl_ct'] == '002') | (pre['days_to_sttl_ct'] == '000')\
-                  | (pre['days_to_sttl_ct']  == '001') | (pre['days_to_sttl_ct'] == 'None') ]
-        
-        # Remove when-issued indicator #
-        pre = pre[  (pre['wis_fl'] != 'Y')        ]  
-
-        # Remove locked-in indicator #
-        pre = pre[  (pre['lckd_in_ind'] != 'Y')   ]
-        
-        # Remove trades with special conditions #
-        pre = pre[  (pre['sale_cndtn_cd'] == 'None') | (pre['sale_cndtn_cd'] == '@')   ]
-                    
-        #* ********************************* */
-        #* 2.1 Remove Cancellation Cases (C) */
-        #* ********************************* */
-        pre_c = pre[pre['trc_st'] == 'C']       
-        pre_w = pre[pre['trc_st'] == 'W']       
-        pre_t = pre[pre['trc_st'] == 'T']        
-        
-        # Match Cancellation by the 7 keys:
-        # Cusip_ID, Execution Date and Time, Quantity, Price, Buy/Sell Indicator, Contra Party
-        # C records show ORIG_MSG_SEQ_NB matching orignal record MSG_SEQ_NB;
-        merged = pd.merge(pre_t.drop_duplicates(), pre_c[[
-                          'cusip_id',
-                          'trd_exctn_dt',
-                          'trd_exctn_tm',
-                          'rptd_pr',
-                          'entrd_vol_qt',
-                          'trd_rpt_dt',
-                          'orig_msg_seq_nb',
-                          'trc_st']],
-                           left_on=[        'cusip_id', 
-                                            'trd_exctn_dt', 
-                                            'trd_exctn_tm', 
-                                            'rptd_pr', 
-                                            'entrd_vol_qt', 
-                                            'trd_rpt_dt', 
-                                            'msg_seq_nb'], # msg
-                                          right_on=['cusip_id', 
-                                            'trd_exctn_dt', 
-                                            'trd_exctn_tm', 
-                                            'rptd_pr', 
-                                            'entrd_vol_qt', 
-                                            'trd_rpt_dt', 
-                                            'orig_msg_seq_nb']  ,  # orig_msg                      
-                        how = "left")
-        
-        
-        merged = merged.drop_duplicates()
-        
-        # Filter out C cases
-        _del_c     = merged[merged['trc_st_y'] == 'C']
-        clean_pre1 = merged[merged['trc_st_y'] != 'C']
-        
-        # Clean-up clean_pre1#
-        clean_pre1.drop(['orig_msg_seq_nb_y', 'trc_st_y'], axis = 1, inplace = True)
-        clean_pre1.rename(columns={'trc_st_x':'trc_st',
-                                   'orig_msg_seq_nb_x':'orig_msg_seq_nb'}, inplace=True) 
-        
-        #* ******************************* */
-        #* 2.2 Remove Correction Cases (W) */
-        #* ******************************* */
-        
-        # * NOTE: on a given day, a bond can have more than one round of correction
-        # * One W to correct an older W, which then corrects the original T
-        # * Before joining back to the T data, first need to clean out the W to
-        # * handle the situation described above;
-        # * The following section handles the chain of W cases;
-        
-        # 2.2.1 Sort out all msg_seq_nb;
-        w_msg = pre_w[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb']]
-        w_msg['flag'] = 'msg'
-        
-        # 2.2.1 Sort out all mapped original msg_seq_nb;
-        w_omsg = pre_w[['cusip_id', 'bond_sym_id', 'trd_exctn_dt', 'trd_exctn_tm', 'orig_msg_seq_nb']]
-        w_omsg = w_omsg.rename(columns={'orig_msg_seq_nb': 'msg_seq_nb'})
-        w_omsg['flag'] = 'omsg'
-        
-        w = pd.concat([w_omsg, w_msg])
-        
-        # 2.2.2 Count the number of appearance (napp) of a msg_seq_nb: 
-        w_napp = w.groupby(['cusip_id', 
-                            'bond_sym_id', 
-                            'trd_exctn_dt', 
-                            'trd_exctn_tm', 
-                            'msg_seq_nb']).size().reset_index(name='napp')
-        
-        # * 2.2.3 Check whether one msg_seq_nb is associated with both msg and orig_msg or only to orig_msg;
-        # * If msg_seq_nb appearing more than once is associated with only orig_msg - 
-        # * It means that more than one msg_seq_nb is linked to the same orig_msg_seq_nb for correction. 
-        # * Examples: cusip_id='362320AX1' and trd_Exctn_dt='04FEB2005'd (3 cases like this in total)
-        # * If ntype=2 then a msg_seq_nb is associated with being both msg_seq_nb and orig_msg_seq_nb;
-        
-        w_mult = w.drop_duplicates(subset = [ 'cusip_id', 
-                                              'bond_sym_id', 
-                                              'trd_exctn_dt', 
-                                              'trd_exctn_tm', 
-                                              'msg_seq_nb', 
-                                              'flag'])
-       
+    CUSIP_Sample = list(IDs['complete_cusip'].unique())
     
-        w_mult1 = w_mult.groupby(['cusip_id', 
-                                  'bond_sym_id', 
-                                  'trd_exctn_dt', 
-                                  'trd_exctn_tm', 
-                                  'msg_seq_nb',
-                                  ]).size().reset_index(name='ntype')
-        
-        # 2.2.4 Combine the npair and ntype info;       
-        w_comb = pd.merge(w_napp, w_mult1, on=['cusip_id', 
-                                               'bond_sym_id', 
-                                               'trd_exctn_dt', 
-                                               'trd_exctn_tm', 
-                                               'msg_seq_nb'], 
-                    how='left').sort_values(by= ['cusip_id',  
-                                                 'trd_exctn_dt', 
-                                                 'trd_exctn_tm'])
-                                       
-        # Map back by matching CUSIP Excution Date and Time to remove msg_seq_nb that appears more than once;
-        # If napp=1 or (napp>1 but ntype=1);
-        __w_keep = pd.merge(w_comb[(w_comb['napp'] == 1) | ((w_comb['napp'] > 1) & (w_comb['ntype'] == 1))], 
-                          w, 
-                          on=['cusip_id',                               
-                              'trd_exctn_dt', 
-                              'trd_exctn_tm', 
-                              'msg_seq_nb',
-                              ], 
-          how = "inner",
-          suffixes=('', '_DROP')).filter(regex='^(?!.*_DROP)').sort_values(by=
-                                   ['cusip_id',                               
-                                   'trd_exctn_dt', 
-                                   'trd_exctn_tm'])
-  
-        # =====================================================================
-       
-        # 2.2.5 Caluclate no of pair of records;
-        # Assuming the original table is named "__w_keep"
-       
-        __w_keep['npair'] = __w_keep.drop_duplicates().groupby(by=[
-                                                 'cusip_id', 
-                                                 'trd_exctn_dt',
-                                                 'trd_exctn_tm'])['cusip_id'].transform("count")/2
-        __w_keep =  __w_keep.sort_values(by=
-                                 ['cusip_id',                               
-                                 'trd_exctn_dt', 
-                                 'trd_exctn_tm'])
-        
-        # For records with only one pair of entry at a given time stamp 
-        # - transpose using the flag information;
-        __w_keep1 = __w_keep[__w_keep['npair']==1].pivot(index=['cusip_id', 
-                                                                'trd_exctn_dt', 
-                                                                'trd_exctn_tm',
-                                                                ],
-                                                         columns='flag', 
-                                                         values='msg_seq_nb')
-       
-        
-        
-        __w_keep1.reset_index(inplace=True)
-        __w_keep1.rename(columns={'msg': 'msg_seq_nb', 'omsg': 'orig_msg_seq_nb'}, inplace=True)
-        
-        # For records with more than one pair of entry at a given time stamp 
-        # - join back the original msg_seq_nb;
-        __w_keep2 = pd.merge(__w_keep[(__w_keep['flag'] == 'msg') & (__w_keep['npair'] > 1)], pre_w, 
-                    left_on = ['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], 
-                    right_on = ['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], 
-                    how = 'left',
-                    suffixes=('', '_DROP')).filter(regex='^(?!.*_DROP)').sort_values(by=
-                                             ['cusip_id',                               
-                                             'trd_exctn_dt', 
-                                             'trd_exctn_tm'])
-              
-        __w_keep2 = __w_keep2[['cusip_id',                             
-                               'trd_exctn_dt',
-                               'trd_exctn_tm',
-                               'msg_seq_nb',
-                               'orig_msg_seq_nb']].drop_duplicates()
-        
-        
-        __w_clean = pd.concat([__w_keep1, __w_keep2], axis=0)
-        
-        # * 2.2.6 Join back to get all the other information;
-        w_clean = pd.merge(__w_clean, pre_w.drop(columns = ['orig_msg_seq_nb']), 
-                   left_on  = ['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], 
-                   right_on = ['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], 
-                   how = 'left').drop_duplicates(subset = ['orig_msg_seq_nb',
-                                                           'cusip_id',
-                                                           'trd_exctn_dt',
-                                                           'trd_exctn_tm',
-                                                           'msg_seq_nb'])
-        
-        
-        
-        # /* 2.2.7 Match up with Trade Record data to delete the matched T record */;
-        # * Matching by Cusip_ID, Date, and MSG_SEQ_NB;
-        # * W records show ORIG_MSG_SEQ_NB matching orignal record MSG_SEQ_NB;
-        clean_pre2 = pd.merge(clean_pre1.drop_duplicates(), w_clean[[
-                                                   'cusip_id', 
-                                                   'trd_exctn_dt', 
-                                                   'msg_seq_nb',
-                                                   'orig_msg_seq_nb',
-                                                   'trc_st' ]], 
-                      left_on  = ['cusip_id', 'trd_exctn_dt', 'msg_seq_nb'], 
-                      right_on = ['cusip_id', 'trd_exctn_dt', 'orig_msg_seq_nb'], 
-                      how = 'left')
-               
-        # Clean-up clean_pre2 #
-        clean_pre2.rename(columns={ 'trc_st_x':'trc_st',
-                                    'trc_st_y':'trc_st_w',
-                                    'msg_seq_nb_x':'msg_seq_nb',
-                                    'msg_seq_nb_y':'mod_msg_seq_nb',
-                                    'orig_msg_seq_nb_x':'orig_msg_seq_nb',
-                                    'orig_msg_seq_nb_y':'mod_orig_msg_seq_nb'}, inplace=True) 
-        
-        _del_w =  clean_pre2[clean_pre2.trc_st_w == "W"]                                                                              
+    def divide_chunks(l, n):     
+        for i in range(0, len(l), n): 
+            yield l[i:i + n] 
 
-        # * Delete matched T records;
-        _clean_pre2 =  clean_pre2[clean_pre2['trc_st_w'].isnull()]
-                       
-        _clean_pre2 = _clean_pre2.drop(columns = ['trc_st_w', 
-                                                  'mod_msg_seq_nb', 
-                                                  'mod_orig_msg_seq_nb'])
-        
-        # * Replace T records with corresponding W records;
-        # * Filter out W records with valid matching T from the previous step;
+    cusip_chunks = list(divide_chunks(CUSIP_Sample, 500)) 
 
-        rep_w = pd.merge(w_clean.drop_duplicates(), _del_w[['cusip_id',
-                                                            'trd_exctn_dt',
-                                                            'trc_st_w',
-                                                            'mod_msg_seq_nb',
-                                                            'mod_orig_msg_seq_nb']], 
-                 left_on  = ['cusip_id', 'trd_exctn_dt', 'msg_seq_nb'], 
-                 right_on = ['cusip_id', 'trd_exctn_dt', 'mod_msg_seq_nb'], 
-                how = 'left')
-        
-        
-        rep_w = rep_w[rep_w['trc_st_w'] == 'W']
-        
-        rep_w = rep_w.drop_duplicates(subset = ['cusip_id',
-                                                'trd_exctn_dt',
-                                                'msg_seq_nb',
-                                                'orig_msg_seq_nb',
-                                                'rptd_pr',
-                                                'entrd_vol_qt'])
-        rep_w = rep_w.drop(columns = [            'trc_st_w', 
-                                                  'mod_msg_seq_nb', 
-                                                  'mod_orig_msg_seq_nb'])
-              
-        clean_pre3 = pd.concat([_clean_pre2, rep_w], axis = 0)
-        
-        #* ***************** */
-        #* 2.3 Reversal Case */
-        #* ***************** */
-        # Filter data by asof_cd = 'R' and keep only certain columns
-       
-        _rev_header = clean_pre3[ clean_pre3['asof_cd'] == 'R'][[  'cusip_id', 
-                                                                   'bond_sym_id',
-                                                                   'trd_exctn_dt',
-                                                                   'trd_exctn_tm',
-                                                                   'trd_rpt_dt',
-                                                                   'trd_rpt_tm',
-                                                                   'entrd_vol_qt', 
-                                                                   'rptd_pr',
-                                                                   'rpt_side_cd',
-                                                                   'cntra_mp_id']]       
-        #* Option B: Match by only 6 keys: CUSIP_ID, 
-        # Execution Date, Vol, Price, B/S and C/D (remove the time dimension);
-        _rev_header = _rev_header.sort_values(by=['cusip_id',
-                                                 'bond_sym_id', 
-                                                 'trd_exctn_dt', 
-                                                 'entrd_vol_qt', 
-                                                 'rptd_pr', 
-                                                 'rpt_side_cd',
-                                                 'cntra_mp_id', 
-                                                 'trd_exctn_tm', 
-                                                 'trd_rpt_dt', 
-                                                 'trd_rpt_tm'])
-              
-        _rev_header6 = _rev_header.copy()
-        _rev_header6['seq'] = _rev_header6.groupby(['cusip_id', 
-                                                    'bond_sym_id',
-                                                    'trd_exctn_dt',
-                                                    'entrd_vol_qt',
-                                                    'rptd_pr',
-                                                    'rpt_side_cd', 
-                                                    'cntra_mp_id']).cumcount() + 1
-        
-        # * Create the same ordering among the non-reversal records;
-        # * Remove records that are R (reversal) D (Delayed dissemination) and 
-        # X (delayed reversal);
-        _clean_pre4 = clean_pre3[~clean_pre3['asof_cd'].isin(['R', 'X', 'D'])]
-        
-        _clean_pre4_header = _clean_pre4[['cusip_id',
-                                          'bond_sym_id',
-                                          'trd_exctn_dt',
-                                          'trd_exctn_tm',
-                                          'entrd_vol_qt',
-                                          'rptd_pr', 
-                                          'rpt_side_cd',
-                                          'cntra_mp_id',
-                                          'trd_rpt_dt', 
-                                          'trd_rpt_tm', 
-                                          'msg_seq_nb']]
-        
-        # Match by 6 keys (excluding execution time);
-        _clean_pre4_header = _clean_pre4_header.sort_values(by=['cusip_id', 
-                                                                'bond_sym_id',
-                                                                'trd_exctn_dt',
-                                                                'entrd_vol_qt',
-                                                                'rptd_pr', 
-                                                                'rpt_side_cd', 
-                                                                'cntra_mp_id',
-                                                                'trd_exctn_tm', 
-                                                                'trd_rpt_dt', 
-                                                                'trd_rpt_tm', 
-                                                                'msg_seq_nb'])
-        
-        _clean_pre4_header['seq6'] = _clean_pre4_header.groupby(['cusip_id', 
-                                                                'bond_sym_id', 
-                                                                'trd_exctn_dt', 
-                                                                'entrd_vol_qt',
-                                                                'rptd_pr', 
-                                                                'rpt_side_cd', 
-                                                                'cntra_mp_id']).cumcount() + 1
-        
-        _clean_pre5_header = pd.merge(_clean_pre4_header.drop_duplicates(), _rev_header6, left_on=['cusip_id',
-                                                                            'trd_exctn_dt', 
-                                                                            'entrd_vol_qt',
-                                                                            'rptd_pr', 
-                                                                            'rpt_side_cd', 
-                                                                            'cntra_mp_id',
-                                                                            'seq6'], 
-                                                                        right_on=['cusip_id',
-                                                                            'trd_exctn_dt', 
-                                                                            'entrd_vol_qt',
-                                                                            'rptd_pr', 
-                                                                            'rpt_side_cd', 
-                                                                            'cntra_mp_id',
-                                                                           'seq'],                                    
-                                                        how = "left", 
-                                                        suffixes=('', '_DROP')).filter(regex='^(?!.*_DROP)')
-                               
-        _clean_pre5_header = _clean_pre5_header.rename(columns={'seq': 'rev_seq6'}).drop_duplicates()
-        _rev_matched6      = _clean_pre5_header[_clean_pre5_header['rev_seq6'].notna()]
+    CleaningExport = pd.DataFrame(index=range(0, len(cusip_chunks)), columns=['Obs.Pre', 'Obs.PostBBW', 'Obs.PostDickNielsen'])
 
+    for i, cusip_chunk in enumerate(cusip_chunks):  
+        print(i)
+        trace = gather_trace_data(db, cusip_chunk, feed_type)
 
-        # As 6 key matching has a higher record of finding reversal match, 
-        # use the 6 keys results now;
-        _clean_pre5_header = _clean_pre5_header[_clean_pre5_header['rev_seq6'].isna()]
-        _clean_pre5_header = _clean_pre5_header.drop(columns=['rev_seq6',
-                                                              'seq6']    )
-        
-        
-        _clean_pre5 = _clean_pre4.merge(_clean_pre5_header, on=['cusip_id',
-                                                                'trd_exctn_dt',
-                                                                'trd_exctn_tm',
-                                                                'entrd_vol_qt', 
-                                                                'rptd_pr', 
-                                                                'rpt_side_cd', 
-                                                                'cntra_mp_id', 
-                                                                'msg_seq_nb', 
-                                                                'trd_rpt_dt',
-                                                                'trd_rpt_tm'], how='inner',                                      
-                                        suffixes=('', '_DROP')).filter(regex='^(?!.*_DROP)')
-        
-        _clean_pre5 = _clean_pre5.drop_duplicates()
-        
-        # =====================================================================
-        # * Combine the pre and post data together */;
-        clean_post2 = clean_post2[[                    'cusip_id',
-                                                       'trd_exctn_dt', 
-                                                       'trd_exctn_dtm',                                                   
-                                                       'rptd_pr',
-                                                       'entrd_vol_qt',
-                                                       'rpt_side_cd',
-                                                       ]]
-        _clean_pre5 = _clean_pre5[clean_post2.columns]
-              
-        trace_post = pd.concat([_clean_pre5, clean_post2], ignore_index=True)
+        CleaningExport['Obs.Pre'].iloc[i] = int(len(trace))
 
-        # Create aggregation time variable
-        if agg_level == 'daily':
-            trace_post['agg_level'] = 'daily'
-            trace_post['agg_time'] = None
-        elif agg_level == 'hourly':
-            trace_post['agg_level'] = 'hourly'
-            trace_post['agg_time'] = trace_post['trd_exctn_dtm'].dt.hour
+        if len(trace) <= 100:
+            CleaningExport['Obs.PostBBW'].iloc[i] = int(len(trace))
+            CleaningExport['Obs.PostDickNielsen'].iloc[i] = int(len(trace))
+            continue
         else:
-            raise ValueError('agg_level must be daily or hourly')
-    
-        trace = trace_post.set_index(['cusip_id','trd_exctn_dt','agg_level','agg_time']).sort_index(level = 'cusip_id') 
-        
-        CleaningExport['Obs.PostDickNielsen'].iloc[i] = int(len(trace))
+            trace = clean_trace_data(trace)
 
-        #* ***************** */
-        #* Prices / Volume   */
-        #* ***************** */
-        # Price - Equal-Weight   #
-        prc_EW = trace.groupby(['cusip_id','trd_exctn_dt','agg_level','agg_time'])[['rptd_pr']].mean().sort_index(level  =  'cusip_id').round(4) 
-        prc_EW.columns = ['prc_ew']
-        
-        # Price - Volume-Weight # 
-        trace['dollar_vol']    = ( trace['entrd_vol_qt'] * trace['rptd_pr']/100 ).round(0) # units x clean prc                               
-        trace['value-weights'] = trace.groupby([ 'cusip_id','trd_exctn_dt','agg_level','agg_time'],
-                                                group_keys=False)[['entrd_vol_qt']].apply( lambda x: x/np.nansum(x) )
-        prc_VW = trace.groupby(['cusip_id','trd_exctn_dt','agg_level','agg_time'])[['rptd_pr','value-weights']].apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) ).to_frame().round(4)
-        prc_VW.columns = ['prc_vw']
-        
-        PricesAll = prc_EW.merge(prc_VW, how = "inner", left_index = True, right_index = True)  
-        PricesAll.columns                = ['prc_ew','prc_vw']   
-           
-        # Volume #
-        VolumesAll                        = trace.groupby(['cusip_id','trd_exctn_dt', 'agg_level','agg_time'])[['entrd_vol_qt']].sum().sort_index(level  =  "cusip_id")                       
-        VolumesAll['dollar_volume']       = trace.groupby(['cusip_id','trd_exctn_dt', 'agg_level','agg_time'])[['dollar_vol']].sum().sort_index(level  =  "cusip_id").round(0)
-        VolumesAll.columns                = ['qvolume','dvolume']      
+            CleaningExport['Obs.PostBBW'].iloc[i] = int(len(trace))
+            # trace['trd_exctn_dtm'] = pd.to_datetime(trace['trd_exctn_dt'].astype(str) + trace['trd_exctn_tm'].astype(str), format='%Y-%m-%d%H:%M:%S')
 
-        # Illiquidity #
-        # (1) Daily bid prices          #
-        # (2) Daily ask prices          #
-        # (3) Number of daily trades    #
-        
-        # Bid and Ask prices #
-        _bid       = trace[trace['rpt_side_cd'] == 'S']
-        _ask       = trace[trace['rpt_side_cd'] == 'B']
-        
-        # Volume weight Bids #
-        _bid['dollar_vol']    = ( _bid['entrd_vol_qt'] * _bid['rptd_pr']/100 )\
-            .round(0) # units x clean prc                               
-        _bid['value-weights'] = _bid.groupby([ 'cusip_id','trd_exctn_dt','agg_level','agg_time'],
-                    group_keys=False)[['entrd_vol_qt']]\
-            .apply( lambda x: x/np.nansum(x) )
-        
-        prc_BID = _bid.groupby(['cusip_id',
-                               'trd_exctn_dt','agg_level','agg_time'])[['rptd_pr',
-                                                 'value-weights']]\
-            .apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) )\
-                .to_frame().round(4)
-                
-        prc_BID.columns = ['prc_bid']
-        
-        # Volume weight Asks #
-        _ask['dollar_vol']    = ( _ask['entrd_vol_qt'] * _ask['rptd_pr']/100 )\
-            .round(0) # units x clean prc                               
-        _ask['value-weights'] = _ask.groupby([ 'cusip_id','trd_exctn_dt','agg_level','agg_time'],
-                    group_keys=False)[['entrd_vol_qt']]\
-            .apply( lambda x: x/np.nansum(x) )
-        
-        prc_ASK = _ask.groupby(['cusip_id',
-                               'trd_exctn_dt','agg_level','agg_time'])[['rptd_pr',
-                                                 'value-weights']]\
-            .apply( lambda x: np.nansum( x['rptd_pr'] * x['value-weights']) )\
-                .to_frame().round(4)
-                
-        prc_ASK.columns = ['prc_ask']
-              
-        prc_BID_ASK =  prc_BID.merge(prc_ASK, 
-                                     how = "inner", 
-                                     left_index = True, 
-                                     right_index = True) 
-                                                                                                                                                                                                                                              
-        # =============================================================================          
-        price_super_list.append(PricesAll)      
-        volume_super_list.append(VolumesAll)
-        illiquidity_super_list.append(prc_BID_ASK)
-        # =============================================================================  
-        
-PricesExport = pd.concat(price_super_list , axis=0     , ignore_index=False)
-VolumeExport = pd.concat(volume_super_list, axis=0     , ignore_index=False)
-IlliqExport  = pd.concat(illiquidity_super_list, axis=0, ignore_index=False)
+            # trace = trace[trace['entrd_vol_qt'] >= 10000]
 
-# Save in compressed GZIP format # 
-PricesExport.to_csv('Prices_' + agg_level + '.csv.gzip'     , compression='gzip')   
-VolumeExport.to_csv('Volumes_' + agg_level + '.csv.gzip'    , compression='gzip')     
-IlliqExport.to_csv( 'Illiq_' + agg_level + '.csv.gzip'      , compression='gzip')     
-# =============================================================================  
+
+
+
+            CleaningExport['Obs.PostDickNielsen'].iloc[i] = int(len(trace))
+
+            #* ***************** */
+            #* Prices / Volume   */
+            #* ***************** */
+            # Price - Equal-Weight   #
+            
+
+if __name__ == "__main__":
+    main()
+
+
+
