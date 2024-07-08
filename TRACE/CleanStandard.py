@@ -377,6 +377,16 @@ def main(ids_filepath = 'IDs.csv', agg_level = 'daily', feed_type = 'non_rule_14
             volume_super_list.append(VolumesAll)
             illiquidity_super_list.append(prc_BID_ASK)
             # =============================================================================      
+    
+    PricesExport = pd.concat(price_super_list , axis=0     , ignore_index=False)
+    VolumeExport = pd.concat(volume_super_list, axis=0     , ignore_index=False)
+    IlliqExport  = pd.concat(illiquidity_super_list, axis=0, ignore_index=False)
+
+    # Save in compressed GZIP format # 
+    PricesExport.to_csv('Prices_standard_' + agg_level + '.csv.gzip'     , compression='gzip')   
+    VolumeExport.to_csv('Volumes_standard_' + agg_level + '.csv.gzip'    , compression='gzip')     
+    IlliqExport.to_csv( 'Illiq_standard_' + agg_level + '.csv.gzip'      , compression='gzip')     
+    # =============================================================================  
 
 if __name__ == "__main__":
     main()

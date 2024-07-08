@@ -728,9 +728,9 @@ def main(ids_filepath = 'IDs.csv', agg_level = 'daily'):
     IlliqExport  = pd.concat(illiquidity_super_list, axis=0, ignore_index=False)
 
     # Save in compressed GZIP format # 
-    PricesExport.to_csv('Prices_' + agg_level + '.csv.gzip'     , compression='gzip')   
-    VolumeExport.to_csv('Volumes_' + agg_level + '.csv.gzip'    , compression='gzip')     
-    IlliqExport.to_csv( 'Illiq_' + agg_level + '.csv.gzip'      , compression='gzip')     
+    PricesExport.to_csv('Prices_enhanced_' + agg_level + '.csv.gzip'     , compression='gzip')   
+    VolumeExport.to_csv('Volumes_enhanced_' + agg_level + '.csv.gzip'    , compression='gzip')     
+    IlliqExport.to_csv( 'Illiq_enhanced_' + agg_level + '.csv.gzip'      , compression='gzip')     
     # =============================================================================  
 
 if __name__ == "__main__":
