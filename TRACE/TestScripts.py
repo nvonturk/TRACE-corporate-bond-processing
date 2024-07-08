@@ -7,20 +7,20 @@ import zipfile
 import subprocess
 import wrds
 import CleanStandard
+import CleanEnhanced
 
 ## Test 1: Standard Trace
 
 db = wrds.Connection()
 
 # Sample of data
-trace_standard_raw = db.raw_sql("SELECT * FROM trace_standard.trace WHERE ((trd_exctn_dt >= '2010-01-01' AND trd_exctn_dt <= '2010-01-10') OR (trd_exctn_dt >= '2004-09-15' AND trd_exctn_dt <= '2004-09-30') OR (trd_exctn_dt >= '2015-07-10' AND trd_exctn_dt <= '2015-07-20'))")
+trace_standard_raw = db.raw_sql("SELECT * FROM trace_standard.trace WHERE ((trd_exctn_dt >= '2007-02-17' AND trd_exctn_dt <= '2007-04-10'))")
 
 # Clean using Python function
 trace_standard_cleaned_new = CleanStandard.clean_trace_data(trace_standard_raw)
 
 # Read in output from original SAS code
 dtypes = trace_standard_cleaned_new.drop(columns="trd_exctn_dt").dtypes.to_dict()
-
 trace_standard_cleaned_original = pd.read_csv('trace_standard_clean_sample.csv', dtype = dtypes, parse_dates=['trd_exctn_dt'])
 
 # Convert trd_exctn_tm to datetime.time
@@ -30,13 +30,24 @@ trace_standard_cleaned_original['trd_exctn_tm'] = pd.to_datetime(trace_standard_
 trace_standard_cleaned_original['orig_dis_dt'] = pd.to_datetime(trace_standard_cleaned_original['orig_dis_dt'], format='%Y%m%d').dt.date
 
 # Merge the two dataframes
-merged = pd.merge(trace_standard_cleaned_original, trace_standard_cleaned_new, on=['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'], how='outer', suffixes=('_original', '_new'))
+index_cols = ['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb']
+
+merged = pd.merge(trace_standard_cleaned_original, trace_standard_cleaned_new, on=index_cols, how='outer', suffixes=('_original', '_new'))
+
+# Check that the merged dataframe has the same number of rows as the original dataframes
+if len(merged) != len(trace_standard_cleaned_original) or len(merged) != len(trace_standard_cleaned_new):
+    raise ValueError("Number of rows in merged dataframe is not equal to number of rows in original dataframe")
 
 # Check all columns are equal except the merged columnns
-check_cols = trace_standard_cleaned_original.columns.drop(['cusip_id', 'trd_exctn_dt', 'trd_exctn_tm', 'msg_seq_nb'])
+check_cols = trace_standard_cleaned_original.columns.drop(index_cols)
 
 for cname in check_cols:
     mask = ~((merged[cname + '_original'].isna() | merged[cname + '_original'].apply(lambda x: x == "None")) & (merged[cname + '_new'].isna() | merged[cname + '_new'].apply(lambda x: x == "None")))
+
+    # If mask is empty, then all values are missing and we can skip the check
+    if mask.sum() == 0:
+        continue
+
     if cname in ["entrd_vol_qt"]:
         max_error = merged.loc[mask, cname + '_new'] - merged.loc[mask, cname + '_original']
         # Check if the maximum error is greater than 1 as the SAS to CSV output seemed to not preserve after the decimal values (though not clear why the entrd_vol_qt values have fractions)
@@ -45,6 +56,7 @@ for cname in check_cols:
     elif not merged.loc[mask, cname + '_original'].equals(merged.loc[mask, cname + '_new']):
         raise ValueError(f"Column {cname} is not equal")
 
+## Test 2: Enhanced Trace
 
 # Create set of test CUSIPs
 IDs = pd.read_csv("IDs.csv")
@@ -57,7 +69,7 @@ IDs.to_csv("RandomCUSIPs.csv", index=False)
 subprocess.run(["python", "MakeIntra_Daily_v2_testing.py"])
 
 # Run CleanEnhanced.py using the same set of CUSIPs
-subprocess.run(["python", "CleanEnhanced.py", "RandomCUSIPs.csv"])
+CleanEnhanced.main("RandomCUSIPs.csv", "daily")
 
 # Read in the cleaned data
 daily_cleaned_original = pd.read_csv('Prices.csv.gzip', compression='gzip')
