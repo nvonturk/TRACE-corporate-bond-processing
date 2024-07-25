@@ -62,7 +62,7 @@ for cname in check_cols:
 IDs = pd.read_csv("IDs.csv")
 
 # Choose random set of 1000 CUSIPs with a key and save these as a new csv file
-IDs = IDs.sample(n=1000, random_state=2024)
+IDs = IDs.sample(n=100, random_state=2024)
 IDs.to_csv("RandomCUSIPs.csv", index=False)
 
 # Run MakeIntra_Daily_v2_testing.py using the new set of CUSIPs
@@ -73,7 +73,7 @@ CleanEnhanced.main("RandomCUSIPs.csv", "daily")
 
 # Read in the cleaned data
 daily_cleaned_original = pd.read_csv('Prices.csv.gzip', compression='gzip')
-daily_cleaned_new = pd.read_csv('Prices_daily.csv.gzip', compression='gzip')
+daily_cleaned_new = pd.read_csv('Prices_enhanced_daily.csv.gzip', compression='gzip')
 
 # Merge
 merged = pd.merge(daily_cleaned_original, daily_cleaned_new, left_on=['cusip_id', 'trd_exctn_dt'], right_on = ['cusip_id', 'trd_exctn_dtm'], how='outer', suffixes=('_original', '_new'))
@@ -82,5 +82,17 @@ merged = pd.merge(daily_cleaned_original, daily_cleaned_new, left_on=['cusip_id'
 merged['diff'] = abs(merged['prc_vw_original'] - merged['prc_vw_new'])
 merged = merged.sort_values(by='diff', ascending=False)
 max(merged['diff'])
+
+## Test 3: Standard vs. Enhanced Trace comparison
+
+# Except for the tail of the sample, standard and enhanced trace data should be the same
+CleanStandard.main("RandomCUSIPs.csv", "daily")
+
+# Read in the cleaned data
+daily_standard = pd.read_csv('Volumes_standard_daily.csv.gzip', compression='gzip')
+daily_enhanced = pd.read_csv('Volumes_enhanced_daily.csv.gzip', compression='gzip')
+
+# Merge
+merged = pd.merge(daily_standard, daily_enhanced, left_on=['cusip_id', 'trd_exctn_dtm'], right_on = ['cusip_id', 'trd_exctn_dtm'], how='outer', suffixes=('_standard', '_enhanced'))
 
 
